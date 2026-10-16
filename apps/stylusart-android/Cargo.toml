@@ -1,0 +1,57 @@
+[package]
+name = "stylusart-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "StylusArt: the PhotoCraft editor as an Android app for a pen tablet (Xiaomi Pad 7 + Focus Pen)"
+
+# `android_main` must be exported unmangled for NativeActivity to find it, which the
+# `unsafe_code` lint counts as unsafe. Only that one attribute is allowed (lib.rs); everything
+# else stays denied.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Android only: on every other target this crate compiles to an empty library, so workspace-wide
+# `cargo build` / `cargo test` on the desktop are unaffected.
+[target.'cfg(target_os = "android")'.dependencies]
+photocraft-engine = { workspace = true }
+photocraft-io = { workspace = true }
+photocraft-codecs = { workspace = true }
+photocraft-doc = { workspace = true }
+photocraft-ui-egui = { workspace = true }
+eframe = { workspace = true, features = ["wgpu", "android-native-activity"] }
+# `AndroidApp`, the type `android_main` receives; the same winit eframe already uses.
+winit = { version = "0.30.13", default-features = false, features = ["android-native-activity"] }
+egui = { workspace = true }
+log = { workspace = true }
+android_logger = "0.15"
+
+# Packaging with `cargo apk build --release -p stylusart-android` (cargo-apk).
+[package.metadata.android]
+package = "com.jesuschavez.stylusart"
+apk_name = "StylusArt"
+build_targets = ["aarch64-linux-android"]
+# Personal build: cargo-apk signs with the Android debug keystore unless
+# [package.metadata.android.signing.release] points at a personal one (kept out of the repo).
+
+[package.metadata.android.sdk]
+min_sdk_version = 30
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "StylusArt"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+
+[package.metadata.android.application.activity]
+# Rotating or resizing must not restart the activity (and lose the open document).
+config_changes = "orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode"
+launch_mode = "singleTask"
+orientation = "unspecified"
