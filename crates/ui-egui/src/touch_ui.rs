@@ -98,6 +98,12 @@ pub struct TouchUi {
     font_query: String,
     /// A short message at the bottom of the screen, until the time (seconds) it disappears.
     notice: Option<(String, f64)>,
+    /// The colour picker's hue, saturation and value (kept so greys keep their hue).
+    hsv: Hsv,
+    /// The colour being dragged in the picker, shown at once but set on release.
+    picking: Option<Hsv>,
+    /// Colours set recently, newest first.
+    recent: Vec<Color32>,
 }
 
 impl TouchUi {
@@ -113,10 +119,17 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     if !st.started {
         st.started = true;
+        // A finger moves a little and rests longer than a mouse click: a tap still counts as one
+        // within 18 points and 1.2 s (egui's defaults, 6 points and 0.8 s, drop many real taps).
+        ui.ctx().options_mut(|o| {
+            o.input_options.max_click_dist = 18.0;
+            o.input_options.max_click_duration = 1.2;
+        });
         if app.session.active().is_none() {
             new_canvas(app, ui.ctx());
         }
     }
+    dismiss_on_outside_tap(&mut st, ui.ctx());
     top_bar(app, &mut st, ui, &t);
     tool_rail(app, &mut st, ui, &t);
     if st.layers_open {
@@ -136,11 +149,35 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         gallery_sheet(app, &mut st, ui.ctx(), &t);
     }
     show_notice(&mut st, ui.ctx(), &t);
+    // One more frame after any input. A tap's effect (the selected layer, a colour, a tool) is
+    // applied while this frame draws, after the widgets that show it; with a mouse the next
+    // pointer move redraws at once, but a touch screen sends nothing more, so without this the
+    // change would show only on the next touch and the app would seem stuck.
+    if ui.ctx().input(|i| !i.events.is_empty()) {
+        ui.ctx().request_repaint();
+    }
     // "Interfaz de escritorio" in the menu clears the state; otherwise keep it.
     if app.touch_off_requested {
         app.touch_off_requested = false;
     } else {
         app.touch = Some(st);
+    }
+}
+
+/// A tap on the image outside the open popovers closes them (as on iPad and Android). The tap
+/// still does what it does there.
+fn dismiss_on_outside_tap(st: &mut TouchUi, ctx: &egui::Context) {
+    if !(st.menu_open || st.color_open || st.brush_open) {
+        return;
+    }
+    let Some(pos) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) else { return };
+    // Only on the image: the bar and rail buttons toggle their own popovers.
+    let on_canvas = CANVAS_RECT.lock().unwrap_or_else(PoisonError::into_inner).is_some_and(|r| r.contains(pos));
+    if on_canvas && ctx.layer_id_at(pos).is_none_or(|l| l.order == egui::Order::Background) {
+        st.menu_open = false;
+        st.color_open = false;
+        st.brush_open = false;
+        st.picking = None;
     }
 }
 
@@ -759,65 +796,221 @@ fn fg_color(app: &PhotocraftApp) -> Color32 {
     Color32::from_rgb(to8(c[0]), to8(c[1]), to8(c[2]))
 }
 
-fn set_fg(app: &mut PhotocraftApp, c: Color32) {
-    run(app, "tools.setColors", json!({ "foreground": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()) }));
+/// The colour the UI shows as the foreground: the one being dragged in the picker (not sent to
+/// the engine yet), else the engine's.
+fn shown_fg(app: &PhotocraftApp, st: &TouchUi) -> Color32 {
+    st.picking.map_or_else(|| fg_color(app), |hsv| hsv_to_color(hsv))
 }
+
+fn set_fg(app: &mut PhotocraftApp, st: &mut TouchUi, c: Color32) {
+    if c == fg_color(app) {
+        return;
+    }
+    run(app, "tools.setColors", json!({ "foreground": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()) }));
+    st.recent.retain(|r| *r != c);
+    st.recent.insert(0, c);
+    st.recent.truncate(RECENT_MAX);
+}
+
+const RECENT_MAX: usize = 10;
 
 fn color_well(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
     let (outer, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
     let c = outer.center();
     let p = ui.painter();
-    p.circle_filled(c, BTN / 2.0 - 2.0, fg_color(app));
+    p.circle_filled(c, BTN / 2.0 - 2.0, shown_fg(app, st));
     p.circle_stroke(c, BTN / 2.0 - 2.0, Stroke::new(3.0, if st.color_open { t.accent } else { t.text }));
     if resp.clicked() {
         st.color_open = !st.color_open;
         st.menu_open = false;
+        st.brush_open = false;
         st.color_anchor = Some(pos2(outer.right(), outer.bottom() + 6.0));
+        st.hsv = color_to_hsv(fg_color(app), st.hsv);
     }
 }
 
+/// HSV in 0..1, kept by the picker so the hue survives greys and black (an RGB round trip would
+/// lose it and make the picker jump).
+type Hsv = [f32; 3];
+
+fn hsv_to_color([h, s, v]: Hsv) -> Color32 {
+    let h6 = h.rem_euclid(1.0) * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let (r, g, b) = match h6 as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to8 = |f: f32| ((f + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    Color32::from_rgb(to8(r), to8(g), to8(b))
+}
+
+/// `c` as HSV, keeping `prev`'s hue (and saturation) where `c` doesn't define them.
+fn color_to_hsv(c: Color32, prev: Hsv) -> Hsv {
+    let (r, g, b) = (f32::from(c.r()) / 255.0, f32::from(c.g()) / 255.0, f32::from(c.b()) / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let v = max;
+    let s = if max > 0.0 { d / max } else { prev[1] };
+    let h = if d <= f32::EPSILON {
+        prev[0]
+    } else if max == r {
+        ((g - b) / d).rem_euclid(6.0) / 6.0
+    } else if max == g {
+        ((b - r) / d + 2.0) / 6.0
+    } else {
+        ((r - g) / d + 4.0) / 6.0
+    };
+    [h, s, v]
+}
+
+/// A touch colour picker: a large saturation/brightness square and a hue bar, both dragged with
+/// the pen or a finger; the old and new colours side by side; recent colours and swatches. The
+/// colour shows everywhere at once while dragging and is set (one command) on release.
 fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
     let screen = ctx.content_rect();
-    let size = vec2(360.0, 470.0);
+    let size = vec2(380.0, 560.0);
     // Below the colour well, right-aligned with it.
     let anchor = st.color_anchor.unwrap_or(pos2(screen.right() - 80.0, BAR_H + 6.0));
     let left = (anchor.x - size.x).max(screen.left() + 8.0);
     let mut close = false;
+    let mut commit: Option<Color32> = None;
     egui::Area::new(egui::Id::new("touch-color")).order(egui::Order::Foreground).fixed_pos(pos2(left, anchor.y)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
-            ui.set_width(size.x - 32.0);
-            ui.spacing_mut().slider_width = size.x - 32.0;
-            ui.spacing_mut().interact_size = vec2(40.0, 40.0);
-            let mut c = fg_color(app);
-            let before = c;
-            egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque);
-            if c != before {
-                set_fg(app, c);
-            }
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                for s in SWATCHES {
-                    let col = Color32::from_rgb(s[0], s[1], s[2]);
-                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::click());
-                    ui.painter().rect_filled(r, CornerRadius::same(8), col);
-                    ui.painter().rect_stroke(r, CornerRadius::same(8), Stroke::new(1.0, t.card_border), StrokeKind::Inside);
-                    if resp.clicked() {
-                        set_fg(app, col);
-                    }
+            let w = size.x - 32.0;
+            ui.set_width(w);
+            let mut hsv = st.picking.unwrap_or(st.hsv);
+            let mut dragging = false;
+
+            // Saturation (x) / brightness (y) square in the current hue.
+            let (sq, resp) = ui.allocate_exact_size(vec2(w, 230.0), Sense::click_and_drag());
+            let p = ui.painter_at(sq);
+            let mut mesh = egui::Mesh::default();
+            let n = 24u32;
+            for j in 0..=n {
+                for i in 0..=n {
+                    let (fs, fv) = (i as f32 / n as f32, 1.0 - j as f32 / n as f32);
+                    let pos = pos2(sq.left() + sq.width() * i as f32 / n as f32, sq.top() + sq.height() * j as f32 / n as f32);
+                    mesh.colored_vertex(pos, hsv_to_color([hsv[0], fs, fv]));
                 }
-            });
-            ui.add_space(6.0);
+            }
+            for j in 0..n {
+                for i in 0..n {
+                    let a = j * (n + 1) + i;
+                    mesh.add_triangle(a, a + 1, a + n + 1);
+                    mesh.add_triangle(a + 1, a + n + 2, a + n + 1);
+                }
+            }
+            p.add(mesh);
+            p.rect_stroke(sq, CornerRadius::same(10), Stroke::new(1.0, t.card_border), StrokeKind::Inside);
+            if let Some(pt) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on() || resp.dragged()) {
+                hsv[1] = ((pt.x - sq.left()) / sq.width()).clamp(0.0, 1.0);
+                hsv[2] = 1.0 - ((pt.y - sq.top()) / sq.height()).clamp(0.0, 1.0);
+                dragging = true;
+            }
+            let knob = pos2(sq.left() + sq.width() * hsv[1], sq.top() + sq.height() * (1.0 - hsv[2]));
+            // Unclipped, so the knob shows whole at the square's edges.
+            ui.painter().circle_stroke(knob, 13.0, Stroke::new(3.0, Color32::WHITE));
+            ui.painter().circle_stroke(knob, 15.0, Stroke::new(1.5, Color32::from_black_alpha(140)));
+            ui.add_space(14.0);
+
+            // Hue bar.
+            let (bar, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click_and_drag());
+            let p = ui.painter_at(bar);
+            let mut mesh = egui::Mesh::default();
+            let steps = 36u32;
+            for i in 0..=steps {
+                let f = i as f32 / steps as f32;
+                let c = hsv_to_color([f, 1.0, 1.0]);
+                let x = bar.left() + bar.width() * f;
+                mesh.colored_vertex(pos2(x, bar.top()), c);
+                mesh.colored_vertex(pos2(x, bar.bottom()), c);
+                if i > 0 {
+                    let k = 2 * i;
+                    mesh.add_triangle(k - 2, k - 1, k);
+                    mesh.add_triangle(k - 1, k + 1, k);
+                }
+            }
+            p.add(mesh);
+            if let Some(pt) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on() || resp.dragged()) {
+                hsv[0] = ((pt.x - bar.left()) / bar.width()).clamp(0.0, 0.9999);
+                dragging = true;
+            }
+            let hx = bar.left() + bar.width() * hsv[0];
+            let thumb = Rect::from_center_size(pos2(hx, bar.center().y), vec2(14.0, bar.height() + 8.0));
+            p.rect_filled(thumb, CornerRadius::same(7), hsv_to_color([hsv[0], 1.0, 1.0]));
+            p.rect_stroke(thumb, CornerRadius::same(7), Stroke::new(3.0, Color32::WHITE), StrokeKind::Outside);
+            ui.add_space(14.0);
+
+            // Old | new.
+            let (pr, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
+            let half = pr.width() / 2.0;
+            let old_r = Rect::from_min_size(pr.min, vec2(half, pr.height()));
+            let new_r = Rect::from_min_size(pos2(pr.left() + half, pr.top()), vec2(half, pr.height()));
+            ui.painter().rect_filled(old_r, CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, fg_color(app));
+            ui.painter().rect_filled(new_r, CornerRadius { nw: 0, sw: 0, ne: 10, se: 10 }, hsv_to_color(hsv));
+            let hex = hsv_to_color(hsv);
+            ui.painter().text(
+                new_r.center(),
+                Align2::CENTER_CENTER,
+                format!("#{:02X}{:02X}{:02X}", hex.r(), hex.g(), hex.b()),
+                egui::FontId::monospace(15.0),
+                if hsv[2] > 0.6 && hsv[1] < 0.6 { Color32::BLACK } else { Color32::WHITE },
+            );
+            ui.add_space(12.0);
+
+            if dragging {
+                st.picking = Some(hsv);
+                ui.ctx().request_repaint();
+            } else if let Some(h) = st.picking.take() {
+                // Released: set the colour once.
+                st.hsv = h;
+                commit = Some(hsv_to_color(h));
+            }
+
+            // Recent colours, then the swatches.
+            let mut swatch_row = |ui: &mut egui::Ui, colors: &[Color32], label: &str| {
+                if colors.is_empty() {
+                    return;
+                }
+                ui.label(egui::RichText::new(label).size(14.0).color(t.text_dim));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    for &col in colors {
+                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::click());
+                        ui.painter().rect_filled(r, CornerRadius::same(21), col);
+                        ui.painter().rect_stroke(r, CornerRadius::same(21), Stroke::new(1.0, t.card_border), StrokeKind::Inside);
+                        if resp.clicked() {
+                            commit = Some(col);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            };
+            let recent = st.recent.clone();
+            swatch_row(ui, &recent, "Recientes");
+            let swatches: Vec<Color32> = SWATCHES.iter().map(|s| Color32::from_rgb(s[0], s[1], s[2])).collect();
+            swatch_row(ui, &swatches, "Muestras");
             if big_button(ui, "Listo", t).clicked() {
                 close = true;
             }
         });
     });
+    if let Some(c) = commit {
+        set_fg(app, st, c);
+        st.hsv = color_to_hsv(c, st.hsv);
+    }
     if close {
         st.color_open = false;
+        st.picking = None;
     }
 }
-
 fn popover_frame(t: &Tokens) -> egui::Frame {
     egui::Frame::NONE
         .fill(t.card)
