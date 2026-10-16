@@ -14,17 +14,7 @@ dibujar con lápiz. El README original de PhotoCraft está en
 
 ## Qué puedes hacer
 
-StylusArt tiene **dos interfaces** sobre el mismo motor:
-
-- **Interfaz táctil** (la que abre por defecto): botones grandes para dibujar con lápiz y dedos.
-  Lo que tiene botón propio está en las secciones de abajo.
-- **Interfaz de escritorio** (Menú **…** → *Interfaz de escritorio*): los menús y paneles completos
-  de PhotoCraft, con **todas** las funciones: 632 comandos y 67 herramientas, incluidos los
-  filtros (como el **desenfoque gaussiano**), los ajustes de imagen y los estilos de capa que aún no
-  tienen botón táctil. Para volver a la táctil, cierra y abre la app.
-
-La lista completa, en español y marcando lo que ya tiene botón táctil, está en
-**[`docs/FUNCIONES.md`](docs/FUNCIONES.md)**.
+Todo se usa desde la interfaz táctil de la app: botones grandes para dibujar con lápiz y dedos.
 
 ### Dibujar
 - **Lápiz con presión**: el ancho del trazo responde a la presión del Focus Pen (se puede desactivar).
@@ -60,29 +50,10 @@ transformación o un texto en curso aparece la barra **Cancelar / Aplicar**.
   Subexponer color, Oscurecer, Aclarar, Diferencia, Tono, Saturación, Color, Luminosidad…
 
 ### Archivos
-- **Abrir imagen** desde una galería con miniaturas (Imágenes, Cámara, Capturas y Descargas).
+- **Abrir imagen** desde una galería con miniaturas (Imágenes, Cámara, Capturas y Descargas):
+  PNG, JPG, WebP, PSD y archivos de StylusArt (`.pcraft`).
 - **Exportar** a *Imágenes/StylusArt*: PNG, **PNG sin fondo** (sin la capa Fondo) y JPG.
 - Mesas de trabajo de tamaños predefinidos (cuadrado, historia, horizontal, A4).
-
-### Todo lo que incluye el motor (interfaz de escritorio)
-
-Resumen por menú; el detalle está en [`docs/FUNCIONES.md`](docs/FUNCIONES.md).
-
-| Menú | Comandos | Algunos ejemplos |
-|---|---:|---|
-| Archivo | 52 | Nuevo, abrir, guardar, guardar como, exportar (PNG, JPG, WebP, TIFF, PSD…), exportar capas o mesas de trabajo a archivos o PDF, colocar imagen incrustada o vinculada, automatizar e imprimir |
-| Edición | 75 | Deshacer y rehacer por pasos, cortar, copiar y pegar, rellenar (también **según el contenido**), contornear, transformación libre, deformar, perspectiva, deformación de posición libre, escala según el contenido, definir pinceles y motivos, preferencias |
-| Imagen | 61 | **22 ajustes**: niveles, curvas, exposición, brillo y contraste, intensidad, tono y saturación, equilibrio de color, blanco y negro, filtro de fotografía, mezclador de canales, consulta de colores, invertir, posterizar, umbral, mapa de degradado, corrección selectiva, sombras e iluminaciones, tonificación HDR, igualar y reemplazar color; modos de color (RGB, CMYK, Lab, escala de grises), tamaño de imagen y de lienzo, rotar, recortar y cortar |
-| Capa | 163 | Capas de ajuste y de relleno, **estilos de capa** (sombra paralela, sombra interior, resplandor exterior e interior, bisel y relieve, satinado, superposición de color, degradado o motivo, trazo), máscaras de capa y vectoriales, máscara de recorte, objetos inteligentes, mesas de trabajo, grupos, alinear y distribuir, combinar y acoplar |
-| Texto | 45 | Texto de punto y de párrafo, horizontal y vertical, convertir a forma o trazado, deformar texto, suavizado, funciones OpenType, buscar y reemplazar fuentes ausentes |
-| Selección | 25 | Todo, deseleccionar, invertir, **sujeto**, gama de colores, área de enfoque, seleccionar y aplicar máscara, modificar (expandir, contraer, suavizar, calar, borde), máscara rápida, guardar y cargar selección |
-| Filtro | 75 | **Desenfocar** (gaussiano, movimiento, radial, lente, cuadro, superficie, inteligente…), **galería de desenfoque** (campo, iris, cambio de inclinación, trazado, rotación), **licuar**, punto de fuga, Camera Raw, corrección de lente, gran angular, distorsionar (ondas, esferizar, remolino, coordenadas polares…), ruido (añadir, reducir, polvo y rascaduras, mediana), pixelizar (mosaico, cristalizar, semitono…), interpretar (nubes, destello de lente, efectos de iluminación, fibras, llama, árbol, marco), enfocar (máscara de enfoque, enfoque suavizado…), estilizar (pintura al óleo, relieve, viento, hallar bordes, solarizar…), otros (paso alto, máximo, mínimo, desplazamiento) |
-| Vista | 74 | Zoom, ajustar a la pantalla, rotar y voltear la vista, reglas, guías, cuadrícula, cuadrícula de píxeles, ajustar a, modos de pantalla, prueba de color |
-| Ventana | 61 | Paneles: capas, canales, trazados, historial, propiedades, ajustes, pinceles, muestras, color, degradados, motivos, carácter, párrafo, acciones, información, histograma, navegador, composiciones de capas, línea de tiempo |
-
-Formatos: abre PSD, PSB, PNG, JPEG, TIFF, WebP, GIF, BMP, TGA, EXR, HDR, SVG, RAW de cámaras
-(DNG, CR2/CR3, NEF, ARW…), Krita, OpenRaster, Paint.NET y Affinity; abre pinceles `.abr`,
-degradados `.grd` y muestras `.aco`/`.ase` de Photoshop.
 
 ## Novedades por versión
 

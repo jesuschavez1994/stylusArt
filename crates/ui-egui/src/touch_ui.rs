@@ -8,8 +8,8 @@
 //! control here runs the engine command the desktop UI runs (`tools.setBrush`, `history.undo`,
 //! `layer.*`, `tools.setColors`).
 //!
-//! On when [`PhotocraftApp::touch`] is `Some`; the "…" menu switches back to the desktop
-//! interface.
+//! On when [`PhotocraftApp::touch`] is `Some`. StylusArt (the Android app) runs only this
+//! interface: there is no way to switch to the desktop one.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -171,12 +171,7 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if ui.ctx().input(|i| !i.events.is_empty()) {
         ui.ctx().request_repaint();
     }
-    // "Interfaz de escritorio" in the menu clears the state; otherwise keep it.
-    if app.touch_off_requested {
-        app.touch_off_requested = false;
-    } else {
-        app.touch = Some(st);
-    }
+    app.touch = Some(st);
 }
 
 /// A tap on the image outside the open popovers closes them (as on iPad and Android). The tap
@@ -1155,10 +1150,6 @@ fn menu_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
             let finger = FINGER_PAINT.load(Ordering::Relaxed);
             if big_button(ui, if finger { "Dibujar con el dedo: Sí" } else { "Dibujar con el dedo: No" }, t).clicked() {
                 FINGER_PAINT.store(!finger, Ordering::Relaxed);
-            }
-            if big_button(ui, "Interfaz de escritorio", t).clicked() {
-                app.touch_off_requested = true;
-                close = true;
             }
         });
     });

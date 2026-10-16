@@ -809,8 +809,6 @@ pub struct PhotocraftApp {
     /// The touch interface for tablets (`touch_ui`): `Some` replaces the desktop menu bar,
     /// options bar, toolbar and dock. Off by default; the Android shell turns it on.
     pub touch: Option<touch_ui::TouchUi>,
-    /// The touch menu asked to return to the desktop interface (applied after this frame).
-    pub touch_off_requested: bool,
     last_frame_start_ms: f64,
     /// Background job bookkeeping: opening tabs, control replies waiting on a job.
     pub jobs: jobs_ui::JobsUi,
@@ -949,7 +947,6 @@ impl PhotocraftApp {
             background_jobs: false,
             min_frame_ms: None,
             touch: None,
-            touch_off_requested: false,
             last_frame_start_ms: 0.0,
             jobs: Default::default(),
             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
@@ -1979,7 +1976,7 @@ impl eframe::App for PhotocraftApp {
         if self.touch.is_some() && !full_screen {
             touch_ui::chrome(self, ui);
         }
-        let chrome = !full_screen && self.touch.is_none() && !self.touch_off_requested;
+        let chrome = !full_screen && self.touch.is_none();
         if chrome && self.ui.panels.menu_bar {
             panels::title_bar(self, ui);
         }

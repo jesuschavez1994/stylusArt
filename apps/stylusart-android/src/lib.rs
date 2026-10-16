@@ -48,7 +48,7 @@ fn android_main(android: AndroidApp) {
             let _ = EGUI_CTX.set(cc.egui_ctx.clone());
             let mut app = PhotocraftApp::new(Session::new(), services());
             // The tablet interface (large targets, tool rail, tool options, palm rejection) in
-            // place of the desktop menus and panels; its menu can switch back.
+            // place of the desktop menus and panels. The app has no desktop mode.
             let mut touch = TouchUi::new();
             touch.export_dir = Some(PathBuf::from(STORAGE).join("Pictures/StylusArt"));
             touch.gallery_dirs = ["Pictures/StylusArt", "Pictures", "DCIM/Camera", "Pictures/Screenshots", "DCIM/Screenshots", "Download"]
