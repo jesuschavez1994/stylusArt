@@ -11,6 +11,8 @@
 //! `--safe-gpu` draws the canvas on the CPU path, like the app's `--safe-gpu` launch.
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //! `--custom-titlebar` draws the Windows/Linux title bar (caption buttons in the top bar).
+//! `--touch` draws the tablet interface (`touch_ui`) instead of the desktop chrome; `--touch-layers`
+//! also opens its Layers sheet.
 //!
 //! `--monitor 1366x768 --window-top 31` simulates the display the window is on (in points) and
 //! where its content starts on it, e.g. a window running under a Windows taskbar.
@@ -37,6 +39,9 @@ fn main() {
         .unwrap_or((1440.0, 900.0));
     let scale: f32 = arg(&args, "--scale").and_then(|s| s.parse().ok()).unwrap_or(2.0);
     let wayland_notice = args.iter().any(|a| a == "--wayland-notice");
+    // `--touch`: the tablet interface (`touch_ui`) the Android app uses.
+    let touch = args.iter().any(|a| a == "--touch");
+    let touch_layers = args.iter().any(|a| a == "--touch-layers");
     let script: Vec<(String, Value)> =
         arg(&args, "--script").map(|s| serde_json::from_str::<Vec<(String, Value)>>(&s).expect("--script must be [[method, params], …]")).unwrap_or_default();
 
@@ -73,6 +78,11 @@ fn main() {
             services.is_wayland = wayland_notice;
             services.xwayland_command = wayland_notice.then(|| "WAYLAND_DISPLAY= photocraft".into());
             let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+            if touch {
+                let mut touch_ui = photocraft_ui_egui::touch_ui::TouchUi::new();
+                touch_ui.layers_open = touch_layers;
+                app.touch = Some(touch_ui);
+            }
             app.background_jobs = background_jobs;
             app.custom_titlebar = custom_titlebar;
             // `--safe-gpu`: the CPU canvas, as the desktop app's `--safe-gpu` launch.

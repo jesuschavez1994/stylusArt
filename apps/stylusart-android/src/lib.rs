@@ -26,6 +26,9 @@ fn android_main(app: AndroidApp) {
         Box::new(|cc| {
             PhotocraftApp::setup_context(&cc.egui_ctx, ThemeKind::Pro);
             let mut app = PhotocraftApp::new(Session::new(), services());
+            // The tablet interface (large targets, tool rail, floating size/opacity sliders) in
+            // place of the desktop menus and panels; its menu can switch back.
+            app.touch = Some(photocraft_ui_egui::touch_ui::TouchUi::new());
             app.set_theme(&cc.egui_ctx, ThemeKind::Pro);
             if let Some(rs) = cc.wgpu_render_state.clone() {
                 log::info!("wgpu backend {:?} on {}", rs.adapter.get_info().backend, rs.adapter.get_info().name);

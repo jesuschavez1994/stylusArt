@@ -199,6 +199,7 @@ pub mod stroke_trace;
 pub mod stroke_trail;
 pub mod stroke_ui;
 pub mod stylus;
+pub mod touch_ui;
 pub mod swap_arrow;
 pub mod swatches_ui;
 pub mod symmetry_ui;
@@ -805,6 +806,11 @@ pub struct PhotocraftApp {
     /// anything keeps requesting repaints (a drag hovering, autoscroll, Liquify held still).
     /// After #4472 (astigmata).
     pub min_frame_ms: Option<f64>,
+    /// The touch interface for tablets (`touch_ui`): `Some` replaces the desktop menu bar,
+    /// options bar, toolbar and dock. Off by default; the Android shell turns it on.
+    pub touch: Option<touch_ui::TouchUi>,
+    /// The touch menu asked to return to the desktop interface (applied after this frame).
+    pub touch_off_requested: bool,
     last_frame_start_ms: f64,
     /// Background job bookkeeping: opening tabs, control replies waiting on a job.
     pub jobs: jobs_ui::JobsUi,
@@ -942,6 +948,8 @@ impl PhotocraftApp {
             stylus: Default::default(),
             background_jobs: false,
             min_frame_ms: None,
+            touch: None,
+            touch_off_requested: false,
             last_frame_start_ms: 0.0,
             jobs: Default::default(),
             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
@@ -1966,7 +1974,12 @@ impl eframe::App for PhotocraftApp {
         // The OS title bar (and the taskbar / Alt-Tab entry) follows the active file; with the
         // system title bar this is where the document name lives, as the in-app title is hidden.
         panels::sync_window_title(self, &ctx);
-        let chrome = !self.ui.view.hides_chrome();
+        let full_screen = self.ui.view.hides_chrome();
+        // The touch interface replaces the desktop chrome (`touch_ui`), except in Full Screen Mode.
+        if self.touch.is_some() && !full_screen {
+            touch_ui::chrome(self, ui);
+        }
+        let chrome = !full_screen && self.touch.is_none() && !self.touch_off_requested;
         if chrome && self.ui.panels.menu_bar {
             panels::title_bar(self, ui);
         }
@@ -1983,7 +1996,7 @@ impl eframe::App for PhotocraftApp {
             panels::right_dock(self, ui);
         }
         let t = theme::Tokens::get(&ctx);
-        let backdrop = if chrome { prefs_ui::pasteboard_color(self).unwrap_or(t.canvas) } else { egui::Color32::BLACK };
+        let backdrop = if !full_screen { prefs_ui::pasteboard_color(self).unwrap_or(t.canvas) } else { egui::Color32::BLACK };
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(backdrop)).show(ui, |ui| {
             canvas::document_area(self, ui);
         });
