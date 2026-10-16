@@ -236,3 +236,40 @@ pub(crate) fn touch_allowed(down: &TouchDown) -> bool {
         None => true,
     }
 }
+
+/// A pointer event as the touch observer sees it (StylusArt patch): every pointer, kept or
+/// dropped by the touch filter.
+#[derive(Clone, Copy, Debug)]
+pub struct TouchSample {
+    pub pointer_id: u64,
+    pub tool: TouchTool,
+    pub phase: crate::event::TouchPhase,
+    /// Position in physical pixels, window coordinates.
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
+    /// Length of the contact area's major axis, in physical pixels (a palm is much larger than
+    /// a fingertip).
+    pub touch_major: f32,
+    /// The touch filter dropped this pointer: the app's windowing events never see it.
+    pub dropped: bool,
+}
+
+type TouchObserver = Box<dyn Fn(&TouchSample) + Send + Sync>;
+
+static TOUCH_OBSERVER: std::sync::RwLock<Option<TouchObserver>> = std::sync::RwLock::new(None);
+
+/// Install the touch observer (replacing any previous one): it sees every pointer event, also
+/// those of pointers the touch filter dropped, so an app can recognise gestures from fingers it
+/// keeps off its own input.
+pub fn set_touch_observer(observer: impl Fn(&TouchSample) + Send + Sync + 'static) {
+    let mut g = TOUCH_OBSERVER.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *g = Some(Box::new(observer));
+}
+
+pub(crate) fn observe_touch(sample: &TouchSample) {
+    let g = TOUCH_OBSERVER.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(f) = g.as_ref() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(sample)));
+    }
+}

@@ -18,7 +18,7 @@ use crate::error;
 use crate::error::EventLoopError;
 use crate::event::{self, Force, InnerSizeWriter, StartCause};
 use crate::event_loop::{self, ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents};
-use crate::platform::android::{TouchDown, TouchTool};
+use crate::platform::android::{TouchDown, TouchSample, TouchTool};
 use crate::platform::pump_events::PumpStatus;
 
 /// Pointers the touch filter dropped (StylusArt patch), until they lift.
@@ -409,17 +409,17 @@ impl<T: 'static> EventLoop<T> {
                         // StylusArt patch: the touch filter decides, with the tool type, whether
                         // a pointer going down is kept; a dropped one stays dropped until it lifts.
                         let id = pointer.pointer_id() as u64;
-                        {
+                        let tool = match pointer.tool_type() {
+                            ToolType::Finger => TouchTool::Finger,
+                            ToolType::Stylus => TouchTool::Stylus,
+                            ToolType::Eraser => TouchTool::Eraser,
+                            ToolType::Mouse => TouchTool::Mouse,
+                            _ => TouchTool::Unknown,
+                        };
+                        let dropped_now = {
                             let mut dropped =
                                 DROPPED_TOUCHES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             if phase == event::TouchPhase::Started {
-                                let tool = match pointer.tool_type() {
-                                    ToolType::Finger => TouchTool::Finger,
-                                    ToolType::Stylus => TouchTool::Stylus,
-                                    ToolType::Eraser => TouchTool::Eraser,
-                                    ToolType::Mouse => TouchTool::Mouse,
-                                    _ => TouchTool::Unknown,
-                                };
                                 let down = TouchDown {
                                     pointer_id: id,
                                     tool,
@@ -428,9 +428,11 @@ impl<T: 'static> EventLoop<T> {
                                     pressure: pointer.pressure(),
                                 };
                                 dropped.retain(|d| *d != id);
-                                if !crate::platform::android::touch_allowed(&down) {
+                                if crate::platform::android::touch_allowed(&down) {
+                                    false
+                                } else {
                                     dropped.push(id);
-                                    continue;
+                                    true
                                 }
                             } else if dropped.contains(&id) {
                                 if matches!(
@@ -439,8 +441,23 @@ impl<T: 'static> EventLoop<T> {
                                 ) {
                                     dropped.retain(|d| *d != id);
                                 }
-                                continue;
+                                true
+                            } else {
+                                false
                             }
+                        };
+                        crate::platform::android::observe_touch(&TouchSample {
+                            pointer_id: id,
+                            tool,
+                            phase,
+                            x: pointer.x(),
+                            y: pointer.y(),
+                            pressure: pointer.pressure(),
+                            touch_major: pointer.touch_major(),
+                            dropped: dropped_now,
+                        });
+                        if dropped_now {
+                            continue;
                         }
                         let location =
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };

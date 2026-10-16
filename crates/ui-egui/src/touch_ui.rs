@@ -104,6 +104,14 @@ pub struct TouchUi {
     picking: Option<Hsv>,
     /// Colours set recently, newest first.
     recent: Vec<Color32>,
+    /// The brush library sheet is open, and its search text.
+    pub library_open: bool,
+    /// The Layers sheet's blend mode list is open.
+    blend_open: bool,
+    /// The Transform popover is open, and where (beside its rail button).
+    pub transform_open: bool,
+    transform_anchor: Option<Pos2>,
+    brush_query: String,
 }
 
 impl TouchUi {
@@ -130,6 +138,7 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
     }
     dismiss_on_outside_tap(&mut st, ui.ctx());
+    run_gestures(app, ui.ctx());
     top_bar(app, &mut st, ui, &t);
     tool_rail(app, &mut st, ui, &t);
     if st.layers_open {
@@ -145,6 +154,12 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         tool_options(app, &mut st, ui.ctx(), &t);
     }
     action_bar(app, ui.ctx(), &t);
+    if st.transform_open {
+        transform_options(app, &mut st, ui.ctx(), &t);
+    }
+    if st.library_open {
+        brush_library(app, &mut st, ui.ctx(), &t);
+    }
     if st.gallery.is_some() {
         gallery_sheet(app, &mut st, ui.ctx(), &t);
     }
@@ -167,7 +182,7 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 /// A tap on the image outside the open popovers closes them (as on iPad and Android). The tap
 /// still does what it does there.
 fn dismiss_on_outside_tap(st: &mut TouchUi, ctx: &egui::Context) {
-    if !(st.menu_open || st.color_open || st.brush_open) {
+    if !(st.menu_open || st.color_open || st.brush_open || st.transform_open) {
         return;
     }
     let Some(pos) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) else { return };
@@ -177,6 +192,7 @@ fn dismiss_on_outside_tap(st: &mut TouchUi, ctx: &egui::Context) {
         st.menu_open = false;
         st.color_open = false;
         st.brush_open = false;
+        st.transform_open = false;
         st.picking = None;
     }
 }
@@ -266,6 +282,14 @@ fn tool_rail(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &T
                     }
                 }
                 ui.add_space(10.0);
+                let resp = icon_button(ui, "scaling", st.transform_open, "Transformar");
+                if resp.clicked() {
+                    st.transform_open = !st.transform_open;
+                    st.transform_anchor = Some(pos2(resp.rect.right() + 22.0, resp.rect.top()));
+                    st.brush_open = false;
+                    st.color_open = false;
+                    st.menu_open = false;
+                }
                 let resp = icon_button(ui, "sliders-horizontal", st.brush_open, "Ajustes del pincel");
                 if resp.clicked() {
                     toggle_brush(st, resp.rect);
@@ -297,7 +321,7 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
     let tool = app.ui.tool;
     let height = match tool {
         Tool::Type => 700.0,
-        Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => 540.0,
+        Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => 720.0,
         _ => 380.0,
     };
     let anchor = st.brush_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
@@ -318,7 +342,7 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
             });
             ui.add_space(6.0);
             match tool {
-                Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => brush_options(app, ui, w, t),
+                Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => brush_options(app, st, ui, w, t),
                 Tool::Type => text_options(app, st, ui, t),
                 Tool::Patch => patch_options(app, ui, t),
                 Tool::Crop => crop_options(app, ui, t),
@@ -351,8 +375,13 @@ fn tool_hint(tool: Tool) -> &'static str {
 
 /// Brush settings: a live preview of the stroke at its real width, then width, opacity and
 /// hardness sliders and the pressure switch (Samsung Notes' pen popover).
-fn brush_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, w: f32, t: &Tokens) {
+fn brush_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, w: f32, t: &Tokens) {
     stroke_preview(app, ui, w, t);
+    ui.add_space(8.0);
+    if big_button(ui, "Cambiar pincel…", t).clicked() {
+        st.library_open = true;
+        st.brush_open = false;
+    }
     ui.add_space(12.0);
     let b = app.session.tools.brush.clone();
     // Width: logarithmic, so small sizes get most of the travel.
@@ -386,6 +415,8 @@ fn brush_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, w: f32, t: &Tokens)
     if switch_row(ui, "La presión controla el ancho", &mut pressure, t) {
         run(app, "tools.setBrush", json!({ "brush": { "pressureSize": pressure } }));
     }
+    ui.add_space(12.0);
+    symmetry_options(app, st, ui, t);
 }
 
 const TYPE_MIN_PT: f32 = 6.0;
@@ -618,56 +649,116 @@ fn show_notice(st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
     });
 }
 
-// A wavy stroke with the brush's width (as it looks on the canvas at the current zoom, capped
-/// to the preview's height), opacity, hardness and colour, tapered when pressure sets the width.
+/// The brush's real stroke (rendered by the brush engine, as the Brushes panel does) in the
+/// foreground colour, on the field colour.
 fn stroke_preview(app: &PhotocraftApp, ui: &mut egui::Ui, w: f32, t: &Tokens) {
     let (rect, _) = ui.allocate_exact_size(vec2(w, 100.0), Sense::hover());
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(12), t.field);
-    let b = &app.session.tools.brush;
-    let zoom = app.point_zoom().max(0.01);
-    let width = (b.size * zoom).clamp(1.0, rect.height() - 28.0);
+    ui.painter().rect_filled(rect, CornerRadius::same(12), t.field);
     let erase = matches!(app.ui.tool, Tool::Eraser | Tool::BackgroundEraser | Tool::MagicEraser);
-    let base = if erase { t.text_dim } else { fg_color(app) };
-    let with_alpha = |a: f32| Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (a.clamp(0.0, 1.0) * 255.0).round() as u8);
-    let (x0, x1) = (rect.left() + 20.0 + width / 2.0, rect.right() - 20.0 - width / 2.0);
-    let amp = (rect.height() / 2.0 - 14.0 - width / 2.0).max(0.0);
-    const STEPS: usize = 96;
-    let pts: Vec<(Pos2, f32)> = (0..=STEPS)
-        .map(|i| {
-            let f = i as f32 / STEPS as f32;
-            let c = pos2(x0 + (x1 - x0) * f, rect.center().y - (f * std::f32::consts::TAU).sin() * amp * 0.7);
-            // Pressure ramps in and out, like a real stroke.
-            let pressure = if b.pressure_size { (f * std::f32::consts::PI).sin().max(0.12) } else { 1.0 };
-            (c, (width * pressure / 2.0).max(0.5))
-        })
-        .collect();
-    // A soft brush: a wider, fainter band under the core.
-    let soft = 1.0 - b.hardness.clamp(0.0, 1.0);
-    if soft > 0.01 {
-        p.add(ribbon(&pts, 1.0 + soft, with_alpha(b.opacity * 0.35)));
-    }
-    p.add(ribbon(&pts, 1.0, with_alpha(b.opacity)));
+    let color = if erase { t.text_dim } else { fg_color(app) };
+    let ppp = ui.ctx().pixels_per_point();
+    let (pw, ph) = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
+    let tex = crate::brush_preview::stroke_texture(ui.ctx(), "touch-brush-preview", &app.session.tools.brush, pw, ph, color);
+    ui.painter().image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
 }
 
-/// A filled band along `pts` (centre, half-width), as one triangle strip so a translucent colour
-/// doesn't darken where it overlaps itself.
-fn ribbon(pts: &[(Pos2, f32)], scale: f32, color: Color32) -> egui::Mesh {
-    let mut mesh = egui::Mesh::default();
-    for (i, &(c, r)) in pts.iter().enumerate() {
-        let prev = pts.get(i.saturating_sub(1)).map_or(c, |p| p.0);
-        let next = pts.get(i + 1).map_or(c, |p| p.0);
-        let d = next - prev;
-        let n = if d.length() > 0.0 { vec2(-d.y, d.x).normalized() } else { vec2(0.0, 1.0) };
-        mesh.colored_vertex(c + n * r * scale, color);
-        mesh.colored_vertex(c - n * r * scale, color);
-        if i > 0 {
-            let k = (2 * i) as u32;
-            mesh.add_triangle(k - 2, k - 1, k);
-            mesh.add_triangle(k - 1, k + 1, k);
+/// Painting symmetry for the brush tools: off, or mirrored across the canvas centre.
+const SYMMETRY: &[(&str, &str)] = &[("", "No"), ("vertical", "Vertical"), ("horizontal", "Horizontal"), ("dual", "Doble"), ("diagonal", "Diagonal")];
+
+fn symmetry_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
+    let current = app.session.active().and_then(|d| d.symmetry.as_ref()).and_then(|s| s.preset()).map(|p| p.mode.id().to_string()).unwrap_or_default();
+    ui.label(egui::RichText::new("Simetría").size(17.0).color(t.text));
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        for &(mode, label) in SYMMETRY {
+            if chip(ui, label, current == mode, t).clicked() && current != mode {
+                let r = if mode.is_empty() { app.run("paint.symmetryDisable", json!({})) } else { app.run("paint.setSymmetry", json!({ "mode": mode })) };
+                if let Err(e) = r {
+                    notify(st, ui.ctx(), &e);
+                }
+            }
+        }
+    });
+}
+
+/// The brush presets (built-in and imported) with their real strokes; a tap picks one.
+fn brush_library(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
+    let screen = ctx.content_rect();
+    let width = 560.0_f32.min(screen.width() - RAIL_W - 40.0);
+    let rect = Rect::from_min_size(pos2(RAIL_W + 12.0, screen.top() + BAR_H + 10.0), vec2(width, screen.height() - BAR_H - 26.0));
+    let mut close = false;
+    let mut pick: Option<String> = None;
+    let color = fg_color(app);
+    egui::Area::new(egui::Id::new("touch-brush-library")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+        popover_frame(t).show(ui, |ui| {
+            ui.set_width(rect.width() - 32.0);
+            ui.set_height(rect.height() - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Pinceles").size(22.0).strong().color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::button_with_icon_size(ui, "x", 44.0, 22.0, false, "Cerrar").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add(
+                egui::TextEdit::singleline(&mut st.brush_query)
+                    .hint_text("Buscar pincel…")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::FontId::proportional(18.0))
+                    .margin(egui::Margin::symmetric(10, 8)),
+            );
+            ui.add_space(8.0);
+            let query = st.brush_query.to_lowercase();
+            let presets: Vec<(usize, String, String)> = app
+                .session
+                .tools
+                .presets
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| query.is_empty() || p.name.to_lowercase().contains(&query) || p.group.to_lowercase().contains(&query))
+                .map(|(i, p)| (i, p.name.clone(), p.group.clone()))
+                .collect();
+            if presets.is_empty() {
+                hint(ui, "No hay pinceles que coincidan.", t);
+                return;
+            }
+            let row_h = 92.0;
+            let ppp = ui.ctx().pixels_per_point();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, presets.len(), |ui, range| {
+                for (i, name, group) in presets.get(range).unwrap_or_default() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h - 6.0), Sense::click());
+                    ui.painter().rect_filled(r, CornerRadius::same(12), if resp.is_pointer_button_down_on() { t.pressed } else { t.field });
+                    let stroke_r = Rect::from_min_max(pos2(r.left() + 10.0, r.top() + 6.0), pos2(r.right() - 10.0, r.bottom() - 26.0));
+                    if let Some(p) = app.session.tools.presets.get(*i) {
+                        let tex = crate::brush_preview::stroke_texture(ui.ctx(), &format!("touch-lib-{i}"), &p.brush, (stroke_r.width() * ppp) as u32, (stroke_r.height() * ppp) as u32, color);
+                        ui.painter().image(tex.id(), stroke_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    ui.painter().text(pos2(r.left() + 14.0, r.bottom() - 13.0), Align2::LEFT_CENTER, name, egui::FontId::proportional(16.0), t.text);
+                    if !group.is_empty() {
+                        ui.painter().text(pos2(r.right() - 14.0, r.bottom() - 13.0), Align2::RIGHT_CENTER, group, egui::FontId::proportional(13.0), t.text_dim);
+                    }
+                    if resp.clicked() {
+                        pick = Some(name.clone());
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        });
+    });
+    if let Some(name) = pick {
+        match app.run("tools.setBrush", json!({ "preset": name })) {
+            Ok(_) => {
+                notify(st, ctx, &format!("Pincel: {name}"));
+                close = true;
+            }
+            Err(e) => notify(st, ctx, &e),
         }
     }
-    mesh
+    if close {
+        st.library_open = false;
+    }
 }
 
 fn caption(ui: &mut egui::Ui, label: &str, value: &str, t: &Tokens) {
@@ -1353,6 +1444,7 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
             let mut list = Vec::new();
             rows(&d.doc.layers, 0, &mut list);
             let current = list.iter().find(|r| Some(r.id) == active).map(|r| (r.id, r.opacity, r.mask, r.clipped));
+            let blend = active.and_then(|id| d.doc.layer(photocraft_doc::LayerId(id))).map(|l| l.blend);
             let ctx = ui.ctx().clone();
             // Actions on the active layer.
             if let Some((id, _, mask, clipped)) = current {
@@ -1374,6 +1466,10 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
                     }
                 });
                 ui.add_space(8.0);
+                if let Some(mode) = blend {
+                    blend_picker(app, st, ui, id, mode, t);
+                    ui.add_space(8.0);
+                }
             }
             egui::ScrollArea::vertical().max_height((ui.available_height() - 90.0).max(120.0)).show(ui, |ui| {
                 for r in &list {
@@ -1471,4 +1567,302 @@ fn layer_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, row: &Row, selected: bo
         }
     }
     ui.add_space(6.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Canvas gestures. With palm rejection, fingers on the image never reach egui; the platform
+// shell feeds every touch to [`feed_touch`] instead and these gestures read them:
+// - two fingers moving: pan, pinch zoom and rotate the view around the fingers;
+// - a quick two-finger tap: undo; a quick three-finger tap: redo.
+// A contact as large as a palm, and any finger that lands while the pen is in use (or was a
+// moment ago), is ignored, so a resting hand neither paints nor moves the canvas.
+// ---------------------------------------------------------------------------------------------
+
+/// What happened to a touch point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchPhase {
+    Start,
+    Move,
+    End,
+    Cancel,
+}
+
+/// One touch event from the platform, in points.
+#[derive(Clone, Copy, Debug)]
+pub struct TouchEvent {
+    pub id: u64,
+    /// A pen (or its eraser end) rather than a finger.
+    pub pen: bool,
+    pub phase: TouchPhase,
+    pub pos: Pos2,
+    /// The contact's major axis, in points.
+    pub size: f32,
+    /// The platform kept it from the app's input (a finger on the image).
+    pub dropped: bool,
+}
+
+static TOUCH_QUEUE: Mutex<Vec<(TouchEvent, std::time::Instant)>> = Mutex::new(Vec::new());
+
+/// The platform shell reports every touch here (any thread); the touch interface reads them on
+/// the next frame.
+pub fn feed_touch(e: TouchEvent) {
+    let mut q = TOUCH_QUEUE.lock().unwrap_or_else(PoisonError::into_inner);
+    if q.len() < 4096 {
+        q.push((e, std::time::Instant::now()));
+    }
+}
+
+/// A contact this wide (points, about 18 mm on the Pad 7) is a palm or the side of a hand.
+const PALM_SIZE: f32 = 120.0;
+/// A finger that lands this soon after the pen is ignored: it is the hand holding the pen.
+const PEN_GRACE: f32 = 0.35;
+/// A tap must end this soon and move this little.
+const TAP_SECS: f32 = 0.35;
+const TAP_SLOP: f32 = 24.0;
+
+#[derive(Default)]
+struct Gestures {
+    /// Fingers on the image that count: id -> (where it landed, where it is).
+    fingers: Vec<(u64, Pos2, Pos2)>,
+    /// Ignored contacts (palms, the hand holding the pen) until they lift.
+    ignored: Vec<u64>,
+    /// Pens touching or hovering.
+    pens: Vec<u64>,
+    last_pen: Option<std::time::Instant>,
+    /// The current multi-finger gesture: when it started, most fingers seen, whether it moved.
+    started: Option<std::time::Instant>,
+    max_fingers: usize,
+    moved: bool,
+    /// The two-finger frame the view was last moved from: centroid, distance, angle.
+    last: Option<(Pos2, f32, f32)>,
+}
+
+static GESTURES: Mutex<Option<Gestures>> = Mutex::new(None);
+
+/// Read this frame's touches and apply the gestures (view changes, undo, redo).
+fn run_gestures(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let events = std::mem::take(&mut *TOUCH_QUEUE.lock().unwrap_or_else(PoisonError::into_inner));
+    if events.is_empty() {
+        return;
+    }
+    let mut guard = GESTURES.lock().unwrap_or_else(PoisonError::into_inner);
+    let g = guard.get_or_insert_with(Gestures::default);
+    let mut undo_redo: Option<&str> = None;
+    for (e, at) in events {
+        if e.pen {
+            g.last_pen = Some(at);
+            match e.phase {
+                TouchPhase::Start | TouchPhase::Move => {
+                    if !g.pens.contains(&e.id) {
+                        g.pens.push(e.id);
+                    }
+                }
+                TouchPhase::End | TouchPhase::Cancel => g.pens.retain(|p| *p != e.id),
+            }
+            continue;
+        }
+        // Fingers the app receives itself (on the bars, panels, popovers) are not gestures.
+        if !e.dropped {
+            continue;
+        }
+        match e.phase {
+            TouchPhase::Start => {
+                let pen_busy = !g.pens.is_empty() || g.last_pen.is_some_and(|t| at.duration_since(t).as_secs_f32() < PEN_GRACE);
+                if e.size >= PALM_SIZE || pen_busy || g.ignored.contains(&e.id) {
+                    g.ignored.push(e.id);
+                    continue;
+                }
+                g.fingers.retain(|f| f.0 != e.id);
+                g.fingers.push((e.id, e.pos, e.pos));
+                if g.fingers.len() == 1 {
+                    g.started = Some(at);
+                    g.max_fingers = 1;
+                    g.moved = false;
+                }
+                g.max_fingers = g.max_fingers.max(g.fingers.len());
+                g.last = None;
+            }
+            TouchPhase::Move => {
+                if e.size >= PALM_SIZE && !g.ignored.contains(&e.id) {
+                    // It grew into a palm: drop it from the gesture.
+                    g.ignored.push(e.id);
+                    g.fingers.retain(|f| f.0 != e.id);
+                    g.last = None;
+                    continue;
+                }
+                if let Some(f) = g.fingers.iter_mut().find(|f| f.0 == e.id) {
+                    f.2 = e.pos;
+                    if (f.2 - f.1).length() > TAP_SLOP {
+                        g.moved = true;
+                    }
+                }
+            }
+            TouchPhase::End | TouchPhase::Cancel => {
+                if g.ignored.contains(&e.id) {
+                    g.ignored.retain(|i| *i != e.id);
+                    continue;
+                }
+                let was = g.fingers.len();
+                g.fingers.retain(|f| f.0 != e.id);
+                g.last = None;
+                if was > 0 && g.fingers.is_empty() {
+                    let quick = g.started.is_some_and(|s| at.duration_since(s).as_secs_f32() < TAP_SECS);
+                    if quick && !g.moved && e.phase == TouchPhase::End {
+                        undo_redo = match g.max_fingers {
+                            2 => Some("history.undo"),
+                            3 => Some("history.redo"),
+                            _ => None,
+                        };
+                    }
+                    g.started = None;
+                }
+            }
+        }
+    }
+    // Two fingers: move the view from the last two-finger frame to this one.
+    let frame = (g.fingers.len() == 2).then(|| {
+        let (a, b) = (g.fingers[0].2, g.fingers[1].2);
+        let d = b - a;
+        (pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), d.length().max(1.0), d.y.atan2(d.x))
+    });
+    if let (Some(now), Some(prev)) = (frame, g.last) {
+        let started_moving = g.moved || (now.0 - prev.0).length() > 2.0 || (now.1 / prev.1 - 1.0).abs() > 0.02;
+        if started_moving {
+            g.moved = true;
+            move_view(app, ctx, prev, now);
+        }
+    }
+    g.last = frame;
+    drop(guard);
+    if let Some(id) = undo_redo {
+        run(app, id, json!({}));
+    }
+    ctx.request_repaint();
+}
+
+/// Pan, zoom and rotate the active view so the document point under the fingers' previous
+/// centroid ends under the new one, scaled by their spread and turned by their angle.
+fn move_view(app: &mut PhotocraftApp, ctx: &egui::Context, prev: (Pos2, f32, f32), now: (Pos2, f32, f32)) {
+    let Some(i) = app.session.active_index() else { return };
+    let Some(rect) = *CANVAS_RECT.lock().unwrap_or_else(PoisonError::into_inner) else { return };
+    let size = app.session.documents().get(i).map_or([0, 0], |st| [st.doc.size.width, st.doc.size.height]);
+    let flip = app.ui.view.flip_horizontal;
+    let ppp = ctx.pixels_per_point().max(0.1);
+    let Some(view) = app.ui.views.get_mut(i) else { return };
+    let xf = |zoom: f32, center: [f32; 2], rotation: f32| crate::canvas::ViewXform { rect, zoom: zoom / ppp, center, flip, rotation, aspect: 1.0 };
+    let anchor = xf(view.zoom, view.center, view.rotation).to_doc(prev.0);
+    let zoom = crate::zoom_levels::clamp(view.zoom * (now.1 / prev.1), size);
+    let mut turn = (now.2 - prev.2).to_degrees();
+    if turn > 180.0 {
+        turn -= 360.0;
+    } else if turn < -180.0 {
+        turn += 360.0;
+    }
+    let rotation = crate::rotate_view::wrap_deg(view.rotation + if flip { -turn } else { turn });
+    let under = xf(zoom, view.center, rotation).to_doc(now.0);
+    view.center = [view.center[0] + (anchor[0] - under[0]) as f32, view.center[1] + (anchor[1] - under[1]) as f32];
+    view.zoom = zoom;
+    view.rotation = rotation;
+    view.fit_pending = false;
+    view.fill_pending = false;
+}
+
+/// Layer blend modes offered on the Layers sheet: (engine name, label).
+const BLEND_MODES: &[(&str, &str)] = &[
+    ("Normal", "Normal"),
+    ("Multiply", "Multiplicar"),
+    ("Screen", "Trama"),
+    ("Overlay", "Superponer"),
+    ("SoftLight", "Luz suave"),
+    ("HardLight", "Luz fuerte"),
+    ("ColorDodge", "Sobreexponer color"),
+    ("ColorBurn", "Subexponer color"),
+    ("LinearDodge", "Sobreexposición lineal (añadir)"),
+    ("Darken", "Oscurecer"),
+    ("Lighten", "Aclarar"),
+    ("Difference", "Diferencia"),
+    ("Hue", "Tono"),
+    ("Saturation", "Saturación"),
+    ("Color", "Color"),
+    ("Luminosity", "Luminosidad"),
+];
+
+fn blend_label(mode: photocraft_color::BlendMode) -> String {
+    let id = format!("{mode:?}");
+    BLEND_MODES.iter().find(|(n, _)| *n == id).map_or_else(|| mode.label().to_string(), |(_, l)| (*l).to_string())
+}
+
+/// The active layer's blend mode: a row that opens the list of modes.
+fn blend_picker(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, layer: u64, current: photocraft_color::BlendMode, t: &Tokens) {
+    let label = format!("Fusión: {}", blend_label(current));
+    if chip(ui, &label, st.blend_open, t).clicked() {
+        st.blend_open = !st.blend_open;
+    }
+    if !st.blend_open {
+        return;
+    }
+    let id = format!("{current:?}");
+    ui.add_space(6.0);
+    egui::Frame::NONE.fill(t.card).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+            for &(name, label) in BLEND_MODES {
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+                let on = name == id;
+                ui.painter().rect_filled(r, CornerRadius::same(8), if on { t.row_selected } else { Color32::TRANSPARENT });
+                ui.painter().text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, label, egui::FontId::proportional(17.0), t.text);
+                if resp.clicked() {
+                    if !on && let Err(e) = app.run("layer.setProps", json!({ "layer": layer, "blend": name })) {
+                        notify(st, ui.ctx(), &e);
+                    }
+                    st.blend_open = false;
+                }
+            }
+        });
+    });
+}
+
+/// Transform the active layer (or the selection): free transform with handles, or one-tap flips
+/// and quarter turns.
+fn transform_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
+    let screen = ctx.content_rect();
+    let anchor = st.transform_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
+    let height = 420.0;
+    let lo = screen.top() + BAR_H + 6.0;
+    let top = anchor.y.clamp(lo, (screen.bottom() - height - 8.0).max(lo));
+    let mut close = false;
+    egui::Area::new(egui::Id::new("touch-transform")).order(egui::Order::Foreground).fixed_pos(pos2(anchor.x, top)).show(ctx, |ui| {
+        popover_frame(t).show(ui, |ui| {
+            ui.set_width(BRUSH_POP_W - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Transformar").size(20.0).strong().color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::button_with_icon_size(ui, "x", 40.0, 20.0, false, "Cerrar").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            hint(ui, "Transforma la capa activa (o la selección). Con Transformación libre, arrastra las esquinas con el lápiz para escalar, fuera de ellas para rotar, y toca Aplicar.", t);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            if big_button(ui, "Transformación libre", t).clicked() {
+                invoke(app, ctx, "edit.freeTransform");
+                close = true;
+            }
+            for (id, label) in [
+                ("edit.transform.flipHorizontal", "Voltear horizontal"),
+                ("edit.transform.flipVertical", "Voltear vertical"),
+                ("edit.transform.rotate90Cw", "Rotar 90° a la derecha"),
+                ("edit.transform.rotate90Ccw", "Rotar 90° a la izquierda"),
+            ] {
+                if big_button(ui, label, t).clicked()
+                    && let Err(e) = app.run(id, json!({}))
+                {
+                    notify(st, ctx, &e);
+                }
+            }
+        });
+    });
+    if close {
+        st.transform_open = false;
+    }
 }

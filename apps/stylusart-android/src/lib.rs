@@ -5,6 +5,8 @@
 //! `WindowEvent::Touch` force, which `photocraft_ui_egui::stylus` reads.
 //!
 //! What this shell adds for Android:
+//! - Gestures: the touch observer feeds every touch to `touch_ui`'s gestures (two-finger
+//!   pan/zoom/rotate, two- and three-finger taps for undo and redo).
 //! - Palm rejection: the patched winit (`vendor/winit`) hands every pointer's tool type to a touch
 //!   filter installed here. Pens always pass; a finger (or a palm, which Android reports as one)
 //!   is dropped when it lands on the image, as `touch_ui::finger_allowed` decides.
@@ -24,7 +26,7 @@ use photocraft_ui_egui::theme::ThemeKind;
 use photocraft_ui_egui::touch_ui::TouchUi;
 use photocraft_ui_egui::{PhotocraftApp, Services};
 use winit::platform::android::activity::AndroidApp;
-use winit::platform::android::{TouchDown, TouchTool};
+use winit::platform::android::{TouchDown, TouchSample, TouchTool};
 
 /// Shared storage, as apps see it.
 const STORAGE: &str = "/storage/emulated/0";
@@ -35,6 +37,7 @@ const STORAGE: &str = "/storage/emulated/0";
 fn android_main(android: AndroidApp) {
     android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("StylusArt"));
     winit::platform::android::set_touch_filter(keep_touch);
+    winit::platform::android::set_touch_observer(observe_touch);
     register_bundled_fonts(&android);
     let options = eframe::NativeOptions { android_app: Some(android.clone()), renderer: eframe::Renderer::Wgpu, ..Default::default() };
     let result = eframe::run_native(
@@ -117,6 +120,31 @@ fn keep_touch(down: &TouchDown) -> bool {
             let ppp = ctx.pixels_per_point().max(0.1);
             photocraft_ui_egui::touch_ui::finger_allowed(ctx, egui::pos2(down.x / ppp, down.y / ppp))
         }
+    }
+}
+
+/// Every touch (also the fingers the filter keeps off the image) goes to the touch interface's
+/// gestures: two-finger pan/zoom/rotate, two- and three-finger taps for undo and redo.
+fn observe_touch(s: &TouchSample) {
+    use photocraft_ui_egui::touch_ui::{TouchEvent, TouchPhase, feed_touch};
+    let Some(ctx) = EGUI_CTX.get() else { return };
+    let ppp = ctx.pixels_per_point().max(0.1);
+    let phase = match s.phase {
+        winit::event::TouchPhase::Started => TouchPhase::Start,
+        winit::event::TouchPhase::Moved => TouchPhase::Move,
+        winit::event::TouchPhase::Ended => TouchPhase::End,
+        winit::event::TouchPhase::Cancelled => TouchPhase::Cancel,
+    };
+    feed_touch(TouchEvent {
+        id: s.pointer_id,
+        pen: matches!(s.tool, TouchTool::Stylus | TouchTool::Eraser),
+        phase,
+        pos: egui::pos2(s.x / ppp, s.y / ppp),
+        size: s.touch_major / ppp,
+        dropped: s.dropped,
+    });
+    if s.dropped {
+        ctx.request_repaint();
     }
 }
 

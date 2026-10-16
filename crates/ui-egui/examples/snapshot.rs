@@ -12,7 +12,8 @@
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //! `--custom-titlebar` draws the Windows/Linux title bar (caption buttons in the top bar).
 //! `--touch` draws the tablet interface (`touch_ui`) instead of the desktop chrome; `--touch-layers`
-//! also opens its Layers sheet, `--touch-brush` its tool options, `--touch-color` its colour picker.
+//! also opens its Layers sheet, `--touch-brush` its tool options, `--touch-color` its colour picker,
+//! `--touch-library` its brush library, `--touch-transform` its Transform popover.
 //!
 //! `--monitor 1366x768 --window-top 31` simulates the display the window is on (in points) and
 //! where its content starts on it, e.g. a window running under a Windows taskbar.
@@ -29,6 +30,10 @@ use serde_json::Value;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+}
+
+fn args_has(flag: &str) -> bool {
+    std::env::args().any(|a| a == flag)
 }
 
 fn main() {
@@ -85,6 +90,8 @@ fn main() {
                 touch_ui.layers_open = touch_layers;
                 touch_ui.brush_open = touch_brush;
                 touch_ui.color_open = touch_color;
+                touch_ui.library_open = args_has("--touch-library");
+                touch_ui.transform_open = args_has("--touch-transform");
                 app.touch = Some(touch_ui);
             }
             app.background_jobs = background_jobs;
