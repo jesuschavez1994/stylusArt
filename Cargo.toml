@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
+# Patched third-party crates (see [patch.crates-io]); not workspace members.
+exclude = ["vendor"]
 default-members = ["crates/*", "apps/photocraft", "apps/photocraft-cli", "xtask"]
 
 [workspace.package]
@@ -157,3 +159,8 @@ opt-level = "z"
 [profile.wasm-release.package.photocraft-paint]
 opt-level = 3
 
+# StylusArt: winit with a touch filter that sees each Android pointer's tool type (pen, finger,
+# eraser), for palm rejection. Only `src/platform/android.rs` and
+# `src/platform_impl/android/mod.rs` differ from winit 0.30.13.
+[patch.crates-io]
+winit = { path = "vendor/winit" }

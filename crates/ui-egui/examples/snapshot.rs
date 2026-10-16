@@ -12,7 +12,7 @@
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //! `--custom-titlebar` draws the Windows/Linux title bar (caption buttons in the top bar).
 //! `--touch` draws the tablet interface (`touch_ui`) instead of the desktop chrome; `--touch-layers`
-//! also opens its Layers sheet.
+//! also opens its Layers sheet, `--touch-brush` its brush popover.
 //!
 //! `--monitor 1366x768 --window-top 31` simulates the display the window is on (in points) and
 //! where its content starts on it, e.g. a window running under a Windows taskbar.
@@ -42,6 +42,7 @@ fn main() {
     // `--touch`: the tablet interface (`touch_ui`) the Android app uses.
     let touch = args.iter().any(|a| a == "--touch");
     let touch_layers = args.iter().any(|a| a == "--touch-layers");
+    let touch_brush = args.iter().any(|a| a == "--touch-brush");
     let script: Vec<(String, Value)> =
         arg(&args, "--script").map(|s| serde_json::from_str::<Vec<(String, Value)>>(&s).expect("--script must be [[method, params], …]")).unwrap_or_default();
 
@@ -81,6 +82,7 @@ fn main() {
             if touch {
                 let mut touch_ui = photocraft_ui_egui::touch_ui::TouchUi::new();
                 touch_ui.layers_open = touch_layers;
+                touch_ui.brush_open = touch_brush;
                 app.touch = Some(touch_ui);
             }
             app.background_jobs = background_jobs;

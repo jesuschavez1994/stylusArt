@@ -2969,6 +2969,10 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     let xf = ViewXform { rect, zoom: point_zoom, center: view.center, flip, rotation: view.rotation, aspect };
     let pixel_grid = app.ui.view.shows(app.ui.view.show.pixel_grid);
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
+    // Palm rejection (`touch_ui`): where fingers are kept off the image.
+    if primary && app.touch.is_some() {
+        crate::touch_ui::note_canvas(rect);
+    }
     let stroke_dismissal = primary && crate::shape_stroke_ui::dismiss_from_canvas(app, &response);
     let painter = ui.painter_at(rect);
 
