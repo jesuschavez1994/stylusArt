@@ -45,6 +45,8 @@ apk_name = "StylusArt"
 build_targets = ["aarch64-linux-android"]
 # Bundled fonts (assets/fonts, downloaded by fetch-fonts.sh).
 assets = "assets"
+# The launcher icon (res/mipmap-*/ic_launcher.png, rendered from icon/stylusart-logo.svg).
+resources = "res"
 # Personal build: cargo-apk signs with the Android debug keystore unless
 # [package.metadata.android.signing.release] points at a personal one (kept out of the repo).
 
@@ -62,6 +64,7 @@ max_sdk_version = 32
 
 [package.metadata.android.application]
 label = "StylusArt"
+icon = "@mipmap/ic_launcher"
 theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 
 [package.metadata.android.application.activity]
