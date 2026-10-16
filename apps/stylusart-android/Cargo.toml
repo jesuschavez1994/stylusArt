@@ -33,18 +33,32 @@ winit = { version = "0.30.13", default-features = false, features = ["android-na
 egui = { workspace = true }
 log = { workspace = true }
 android_logger = "0.15"
+# The type engine, to register the APK's bundled fonts.
+photocraft-text = { workspace = true }
+# `Activity.requestPermissions` for the photos permission (the version android-activity uses).
+jni = "0.21"
 
 # Packaging with `cargo apk build --release -p stylusart-android` (cargo-apk).
 [package.metadata.android]
 package = "com.jesuschavez.stylusart"
 apk_name = "StylusArt"
 build_targets = ["aarch64-linux-android"]
+# Bundled fonts (assets/fonts, downloaded by fetch-fonts.sh).
+assets = "assets"
 # Personal build: cargo-apk signs with the Android debug keystore unless
 # [package.metadata.android.signing.release] points at a personal one (kept out of the repo).
 
 [package.metadata.android.sdk]
 min_sdk_version = 30
 target_sdk_version = 35
+
+# Reading the user's photos to open them (Android 13+, and storage before that).
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_IMAGES"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 32
 
 [package.metadata.android.application]
 label = "StylusArt"

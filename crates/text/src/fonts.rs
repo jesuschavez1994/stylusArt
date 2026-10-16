@@ -772,6 +772,12 @@ pub(crate) fn system_font_dirs() -> Vec<std::path::PathBuf> {
         if let Some(h) = &home {
             v.push(h.join("Library/Fonts"));
         }
+    } else if cfg!(target_os = "android") {
+        // System faces, the vendor's (Xiaomi's MiSans and others live under /product), and the
+        // fonts an app bundles, which its shell copies or registers itself.
+        v.push(PathBuf::from("/system/fonts"));
+        v.push(PathBuf::from("/product/fonts"));
+        v.push(PathBuf::from("/system_ext/fonts"));
     } else if cfg!(target_os = "windows") {
         let windir = std::env::var_os("WINDIR").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
         v.push(windir.join("Fonts"));

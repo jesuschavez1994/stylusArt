@@ -1,17 +1,24 @@
-//! Touch interface for tablets (StylusArt on Android): large targets, a tool rail whose active
-//! tool opens a brush popover (stroke preview, width, opacity, hardness), a colour well, a Layers
-//! sheet and palm rejection, in place of the desktop menu
-//! bar, options bar, toolbar and dock. The canvas, dialogs and every action stay the same: each
+//! Touch interface for tablets (StylusArt on Android), in place of the desktop menu bar, options
+//! bar, toolbar and dock: large targets; a tool rail whose active tool opens its options (brush
+//! width/opacity/hardness with a stroke preview, type font/size/alignment, Patch, Crop and
+//! Artboard choices); an Apply/Cancel bar while a crop, transform or text edit is pending; a
+//! colour well; a Layers sheet with Remove Background, layer masks and clipping masks; image
+//! export (PNG with or without the background, JPG) and an image gallery to open photos; palm
+//! rejection. The canvas, dialogs and every action stay the same: each
 //! control here runs the engine command the desktop UI runs (`tools.setBrush`, `history.undo`,
 //! `layer.*`, `tools.setColors`).
 //!
 //! On when [`PhotocraftApp::touch`] is `Some`; the "…" menu switches back to the desktop
 //! interface.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+use photocraft_doc::{Layer, LayerContent};
 use serde_json::json;
 
 use crate::PhotocraftApp;
@@ -35,14 +42,16 @@ const TOOLS: &[(Tool, &str)] = &[
     (Tool::Pencil, "Lápiz"),
     (Tool::Eraser, "Borrador"),
     (Tool::Smudge, "Difuminar"),
-    (Tool::Blur, "Desenfocar"),
     (Tool::PaintBucket, "Bote de pintura"),
     (Tool::Gradient, "Degradado"),
     (Tool::Eyedropper, "Cuentagotas"),
+    (Tool::Type, "Texto"),
     (Tool::Lasso, "Lazo"),
     (Tool::RectMarquee, "Marco rectangular"),
     (Tool::Move, "Mover"),
-    (Tool::Type, "Texto"),
+    (Tool::Crop, "Recortar"),
+    (Tool::Patch, "Parche"),
+    (Tool::Artboard, "Mesa de trabajo"),
 ];
 
 /// Quick colours under the colour wheel.
@@ -61,8 +70,8 @@ const SWATCHES: &[[u8; 3]] = &[
     [111, 78, 55],
 ];
 
-/// Touch interface state (which sheets are open).
-#[derive(Clone, Debug, Default)]
+/// Touch interface state (which sheets are open) and what the platform shell provides.
+#[derive(Default)]
 pub struct TouchUi {
     pub layers_open: bool,
     pub menu_open: bool,
@@ -77,6 +86,18 @@ pub struct TouchUi {
     color_anchor: Option<Pos2>,
     /// Where the brush popover opens (beside the tapped tool), in points.
     brush_anchor: Option<Pos2>,
+    /// Folder exports are written to (Android: Pictures/StylusArt). `None`: Export As dialog.
+    pub export_dir: Option<PathBuf>,
+    /// Folders the image gallery lists (Android: Pictures, DCIM/Camera, Download). Empty: the
+    /// Open dialog instead.
+    pub gallery_dirs: Vec<PathBuf>,
+    /// Asks the platform for permission to read the user's photos (Android runtime permission).
+    pub request_media: Option<Arc<dyn Fn() + Send + Sync>>,
+    gallery: Option<Gallery>,
+    /// The font list's search text.
+    font_query: String,
+    /// A short message at the bottom of the screen, until the time (seconds) it disappears.
+    notice: Option<(String, f64)>,
 }
 
 impl TouchUi {
@@ -108,8 +129,13 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         color_popover(app, &mut st, ui.ctx(), &t);
     }
     if st.brush_open {
-        brush_popover(app, &mut st, ui.ctx(), &t);
+        tool_options(app, &mut st, ui.ctx(), &t);
     }
+    action_bar(app, ui.ctx(), &t);
+    if st.gallery.is_some() {
+        gallery_sheet(app, &mut st, ui.ctx(), &t);
+    }
+    show_notice(&mut st, ui.ctx(), &t);
     // "Interfaz de escritorio" in the menu clears the state; otherwise keep it.
     if app.touch_off_requested {
         app.touch_off_requested = false;
@@ -226,11 +252,17 @@ fn tool_name(tool: Tool) -> &'static str {
     TOOLS.iter().find(|(t, _)| *t == tool).map_or("Pincel", |(_, n)| n)
 }
 
-/// Brush settings beside the tool rail: a live preview of the stroke at its real width, then
-/// width, opacity and hardness sliders and the pressure switch (Samsung Notes' pen popover).
-fn brush_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
+//// The active tool's options beside the tool rail (a second tap on the tool, or the settings
+/// button): brush settings for the painting tools, type settings, Patch, Crop and Artboard
+/// choices, and a short how-to for the rest.
+fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
     let screen = ctx.content_rect();
-    let height = 540.0;
+    let tool = app.ui.tool;
+    let height = match tool {
+        Tool::Type => 700.0,
+        Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => 540.0,
+        _ => 380.0,
+    };
     let anchor = st.brush_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
     let lo = screen.top() + BAR_H + 6.0;
     let top = anchor.y.clamp(lo, (screen.bottom() - height - 8.0).max(lo));
@@ -240,7 +272,7 @@ fn brush_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
             let w = BRUSH_POP_W - 32.0;
             ui.set_width(w);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tool_name(app.ui.tool)).size(20.0).strong().color(t.text));
+                ui.label(egui::RichText::new(tool_name(tool)).size(20.0).strong().color(t.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::button_with_icon_size(ui, "x", 40.0, 20.0, false, "Cerrar").clicked() {
                         close = true;
@@ -248,40 +280,13 @@ fn brush_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
                 });
             });
             ui.add_space(6.0);
-            stroke_preview(app, ui, w, t);
-            ui.add_space(12.0);
-
-            let b = app.session.tools.brush.clone();
-            // Width: logarithmic, so small sizes get most of the travel.
-            let u = (b.size.max(1.0).ln() / SLIDER_MAX_SIZE.ln()).clamp(0.0, 1.0);
-            caption(ui, "Ancho del trazo", &format!("{} px", fmt_size(b.size)), t);
-            if let Some(u) = h_slider(ui, u, SliderFill::Accent, t) {
-                let s = SLIDER_MAX_SIZE.powf(u).clamp(1.0, SLIDER_MAX_SIZE);
-                let s = if s < 10.0 { (s * 10.0).round() / 10.0 } else { s.round() };
-                if s != b.size {
-                    run(app, "tools.setBrush", json!({ "brush": { "size": s }, "coalesce": "touch-size" }));
-                }
-            }
-            ui.add_space(10.0);
-            caption(ui, "Opacidad", &format!("{} %", (b.opacity * 100.0).round()), t);
-            if let Some(u) = h_slider(ui, b.opacity, SliderFill::Opacity(fg_color(app)), t) {
-                let o = (u * 100.0).round().clamp(1.0, 100.0) / 100.0;
-                if o != b.opacity {
-                    run(app, "tools.setBrush", json!({ "brush": { "opacity": o }, "coalesce": "touch-opacity" }));
-                }
-            }
-            ui.add_space(10.0);
-            caption(ui, "Dureza", &format!("{} %", (b.hardness * 100.0).round()), t);
-            if let Some(u) = h_slider(ui, b.hardness, SliderFill::Accent, t) {
-                let h = (u * 100.0).round() / 100.0;
-                if h != b.hardness {
-                    run(app, "tools.setBrush", json!({ "brush": { "hardness": h }, "coalesce": "touch-hardness" }));
-                }
-            }
-            ui.add_space(12.0);
-            let mut pressure = b.pressure_size;
-            if switch_row(ui, "La presión controla el ancho", &mut pressure, t) {
-                run(app, "tools.setBrush", json!({ "brush": { "pressureSize": pressure } }));
+            match tool {
+                Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => brush_options(app, ui, w, t),
+                Tool::Type => text_options(app, st, ui, t),
+                Tool::Patch => patch_options(app, ui, t),
+                Tool::Crop => crop_options(app, ui, t),
+                Tool::Artboard => artboard_options(app, st, ui, t),
+                other => hint(ui, tool_hint(other), t),
             }
         });
     });
@@ -290,7 +295,293 @@ fn brush_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
     }
 }
 
-/// A wavy stroke with the brush's width (as it looks on the canvas at the current zoom, capped
+fn hint(ui: &mut egui::Ui, text: &str, t: &Tokens) {
+    ui.label(egui::RichText::new(text).size(16.0).color(t.text_dim));
+    ui.add_space(8.0);
+}
+
+fn tool_hint(tool: Tool) -> &'static str {
+    match tool {
+        Tool::PaintBucket => "Toca una zona para rellenarla con el color actual.",
+        Tool::Gradient => "Arrastra sobre el lienzo para crear un degradado del color actual al de fondo.",
+        Tool::Eyedropper => "Toca el lienzo para tomar ese color.",
+        Tool::Lasso => "Dibuja alrededor de una zona para seleccionarla. Después puedes pintar solo dentro, moverla o usar el parche.",
+        Tool::RectMarquee => "Arrastra para seleccionar un rectángulo.",
+        Tool::Move => "Arrastra para mover la capa activa (o la selección).",
+        _ => "",
+    }
+}
+
+/// Brush settings: a live preview of the stroke at its real width, then width, opacity and
+/// hardness sliders and the pressure switch (Samsung Notes' pen popover).
+fn brush_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, w: f32, t: &Tokens) {
+    stroke_preview(app, ui, w, t);
+    ui.add_space(12.0);
+    let b = app.session.tools.brush.clone();
+    // Width: logarithmic, so small sizes get most of the travel.
+    let u = (b.size.max(1.0).ln() / SLIDER_MAX_SIZE.ln()).clamp(0.0, 1.0);
+    caption(ui, "Ancho del trazo", &format!("{} px", fmt_size(b.size)), t);
+    if let Some(u) = h_slider(ui, u, SliderFill::Accent, t) {
+        let s = SLIDER_MAX_SIZE.powf(u).clamp(1.0, SLIDER_MAX_SIZE);
+        let s = if s < 10.0 { (s * 10.0).round() / 10.0 } else { s.round() };
+        if s != b.size {
+            run(app, "tools.setBrush", json!({ "brush": { "size": s }, "coalesce": "touch-size" }));
+        }
+    }
+    ui.add_space(10.0);
+    caption(ui, "Opacidad", &format!("{} %", (b.opacity * 100.0).round()), t);
+    if let Some(u) = h_slider(ui, b.opacity, SliderFill::Opacity(fg_color(app)), t) {
+        let o = (u * 100.0).round().clamp(1.0, 100.0) / 100.0;
+        if o != b.opacity {
+            run(app, "tools.setBrush", json!({ "brush": { "opacity": o }, "coalesce": "touch-opacity" }));
+        }
+    }
+    ui.add_space(10.0);
+    caption(ui, "Dureza", &format!("{} %", (b.hardness * 100.0).round()), t);
+    if let Some(u) = h_slider(ui, b.hardness, SliderFill::Accent, t) {
+        let h = (u * 100.0).round() / 100.0;
+        if h != b.hardness {
+            run(app, "tools.setBrush", json!({ "brush": { "hardness": h }, "coalesce": "touch-hardness" }));
+        }
+    }
+    ui.add_space(12.0);
+    let mut pressure = b.pressure_size;
+    if switch_row(ui, "La presión controla el ancho", &mut pressure, t) {
+        run(app, "tools.setBrush", json!({ "brush": { "pressureSize": pressure } }));
+    }
+}
+
+const TYPE_MIN_PT: f32 = 6.0;
+const TYPE_MAX_PT: f32 = 400.0;
+
+/// Type settings: size, alignment, colour and the font list (bundled and system fonts, with a
+/// search field). They apply to the text being edited and to new text.
+fn text_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
+    let ctx = ui.ctx().clone();
+    hint(ui, "Toca el lienzo donde quieras escribir; el teclado aparece solo. Toca Aplicar para terminar.", t);
+    let size = app.ui.tool_options.type_size.clamp(TYPE_MIN_PT, TYPE_MAX_PT);
+    caption(ui, "Tamaño", &format!("{} pt", size.round()), t);
+    let u = ((size / TYPE_MIN_PT).ln() / (TYPE_MAX_PT / TYPE_MIN_PT).ln()).clamp(0.0, 1.0);
+    if let Some(u) = h_slider(ui, u, SliderFill::Accent, t) {
+        let s = (TYPE_MIN_PT * (TYPE_MAX_PT / TYPE_MIN_PT).powf(u)).round();
+        if s != app.ui.tool_options.type_size {
+            app.ui.tool_options.type_size = s;
+            crate::type_tool::apply(app, &ctx, json!({ "size": s, "metricsAsShown": true }));
+        }
+    }
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (align, icon, tip) in [("left", "align-left", "Izquierda"), ("center", "align-center", "Centro"), ("right", "align-right", "Derecha")] {
+            let on = app.ui.tool_options.type_align == align;
+            if icons::button_with_icon_size(ui, icon, 52.0, 24.0, on, tip).clicked() {
+                app.ui.tool_options.type_align = align.into();
+                crate::type_tool::apply(app, &ctx, json!({ "align": align }));
+            }
+        }
+        ui.add_space(8.0);
+        let c = fg_color(app);
+        if chip(ui, "Usar el color actual", false, t).clicked() {
+            let rgb = [f32::from(c.r()) / 255.0, f32::from(c.g()) / 255.0, f32::from(c.b()) / 255.0];
+            crate::type_tool::apply(app, &ctx, json!({ "color": rgb }));
+        }
+    });
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("Tipografía").size(17.0).color(t.text));
+    ui.add_space(4.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut st.font_query)
+            .hint_text("Buscar fuente…")
+            .desired_width(f32::INFINITY)
+            .font(egui::FontId::proportional(18.0))
+            .margin(egui::Margin::symmetric(10, 8)),
+    );
+    ui.add_space(6.0);
+    crate::type_tool::warm_fonts();
+    let families = crate::type_tool::families();
+    let query = st.font_query.to_lowercase();
+    let current = app.ui.tool_options.type_font.clone();
+    egui::ScrollArea::vertical().min_scrolled_height(320.0).max_height(320.0).auto_shrink([false, false]).show(ui, |ui| {
+        let mut shown = 0;
+        for fam in families.iter().filter(|f| !f.starts_with('.') && (query.is_empty() || f.to_lowercase().contains(&query))) {
+            shown += 1;
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+            let sel = *fam == current;
+            ui.painter().rect_filled(r, CornerRadius::same(10), if sel { t.row_selected } else { Color32::TRANSPARENT });
+            ui.painter().text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, fam, egui::FontId::proportional(18.0), t.text);
+            if resp.clicked() {
+                app.ui.tool_options.type_font = fam.clone();
+                let styles = crate::type_tool::styles(fam);
+                let style = if styles.iter().any(|s| s == "Regular") { "Regular".to_string() } else { styles.first().cloned().unwrap_or_else(|| "Regular".into()) };
+                app.ui.tool_options.type_style = style;
+                crate::type_tool::apply(app, &ctx, json!({ "font": fam }));
+            }
+        }
+        if shown == 0 {
+            ui.label(egui::RichText::new(if families.is_empty() { "Cargando fuentes…" } else { "Ninguna fuente coincide." }).color(t.text_dim));
+        }
+    });
+}
+
+fn patch_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    hint(ui, "Rodea la zona a reparar (una mancha, un objeto) y arrástrala hacia una zona limpia: el parche copia la textura y la funde con los bordes.", t);
+    ui.horizontal(|ui| {
+        for (mode, label) in [("source", "Origen"), ("destination", "Destino")] {
+            if chip(ui, label, app.ui.tool_options.patch_mode == mode, t).clicked() {
+                app.ui.tool_options.patch_mode = mode.into();
+            }
+        }
+    });
+    ui.add_space(10.0);
+    let mut aware = app.ui.tool_options.patch_content_aware;
+    if switch_row(ui, "Según el contenido", &mut aware, t) {
+        app.ui.tool_options.patch_content_aware = aware;
+    }
+}
+
+fn crop_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    hint(ui, "Arrastra los bordes o las esquinas del marco y toca Aplicar. Arrastra dentro del marco para moverlo.", t);
+    if big_button(ui, "Restablecer el marco", t).clicked() {
+        crate::crop_ui::cancel(app);
+        crate::crop_ui::ensure_frame(app);
+    }
+    ui.add_space(8.0);
+    if big_button(ui, "Recortar los bordes transparentes", t).clicked() {
+        run(app, "image.trim", json!({ "basedOn": "transparent" }));
+    }
+}
+
+/// Artboard sizes offered in its options (width, height in pixels; 0: the canvas size).
+const ARTBOARDS: &[(&str, f64, f64)] = &[
+    ("Igual que el lienzo", 0.0, 0.0),
+    ("Cuadrado 1080 × 1080", 1080.0, 1080.0),
+    ("Historia 1080 × 1920", 1080.0, 1920.0),
+    ("Horizontal 1920 × 1080", 1920.0, 1080.0),
+    ("A4 vertical (300 ppp)", 2480.0, 3508.0),
+];
+
+fn artboard_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
+    hint(ui, "Arrastra en una zona vacía para dibujar una mesa de trabajo, o crea una de estos tamaños (se coloca a la derecha de la última):", t);
+    for &(label, w, h) in ARTBOARDS {
+        if big_button(ui, label, t).clicked() {
+            let params = if w > 0.0 { json!({ "width": w, "height": h, "name": label }) } else { json!({}) };
+            let ctx = ui.ctx().clone();
+            match app.run("layer.new.artboard", params) {
+                Ok(_) => {
+                    invoke(app, &ctx, "view.fitOnScreen");
+                    notify(st, &ctx, "Mesa de trabajo creada");
+                }
+                Err(e) => notify(st, &ctx, &e),
+            }
+        }
+        ui.add_space(6.0);
+    }
+}
+
+/// A rounded choice button; `on` highlights it.
+fn chip(ui: &mut egui::Ui, text: &str, on: bool, t: &Tokens) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(17.0), t.text);
+    let (r, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, 44.0), Sense::click());
+    ui.painter().rect_filled(r, CornerRadius::same(22), if on { t.accent } else { t.field });
+    ui.painter().galley(pos2(r.center().x - galley.size().x / 2.0, r.center().y - galley.size().y / 2.0), galley, t.text);
+    resp
+}
+
+/// What the Apply / Cancel bar finishes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Text,
+    Transform,
+    Crop,
+}
+
+/// Apply / Cancel, floating under the top bar while a text edit, a transform or a crop is
+/// pending (the desktop's Enter and Esc).
+fn action_bar(app: &mut PhotocraftApp, ctx: &egui::Context, t: &Tokens) {
+    let pending = if app.ui.text_edit.is_some() {
+        Pending::Text
+    } else if app.ui.transform.is_some() {
+        Pending::Transform
+    } else if app.ui.tool == Tool::Crop && app.ui.crop_rect.is_some() {
+        Pending::Crop
+    } else {
+        return;
+    };
+    let screen = ctx.content_rect();
+    let size = vec2(320.0, 64.0);
+    let at = pos2(screen.center().x - size.x / 2.0, screen.top() + BAR_H + 12.0);
+    let mut action = None;
+    egui::Area::new(egui::Id::new("touch-apply")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(t.card)
+            .stroke(Stroke::new(1.0, t.card_border))
+            .corner_radius(CornerRadius::same(32))
+            .inner_margin(egui::Margin::same(8))
+            .shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: Color32::from_black_alpha(80) })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if pill_button(ui, "x", "Cancelar", t.field, t).clicked() {
+                        action = Some(false);
+                    }
+                    if pill_button(ui, "check", "Aplicar", t.accent, t).clicked() {
+                        action = Some(true);
+                    }
+                });
+            });
+    });
+    match (pending, action) {
+        (Pending::Text, Some(true)) => crate::type_tool::commit(app),
+        (Pending::Text, Some(false)) => crate::type_tool::cancel(app),
+        (Pending::Transform, Some(true)) => crate::transform_tool::commit(app),
+        (Pending::Transform, Some(false)) => crate::transform_tool::cancel(app),
+        (Pending::Crop, Some(true)) => crate::canvas::commit_crop(app),
+        (Pending::Crop, Some(false)) => {
+            crate::crop_ui::cancel(app);
+            crate::crop_ui::ensure_frame(app);
+        }
+        (_, None) => {}
+    }
+}
+
+fn pill_button(ui: &mut egui::Ui, icon: &str, text: &str, fill: Color32, t: &Tokens) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(148.0, 48.0), Sense::click());
+    let fill = if resp.is_pointer_button_down_on() { t.pressed } else { fill };
+    ui.painter().rect_filled(r, CornerRadius::same(24), fill);
+    icons::paint(ui, Rect::from_center_size(pos2(r.left() + 30.0, r.center().y), Vec2::splat(24.0)), icon, 22.0, t.text);
+    ui.painter().text(pos2(r.left() + 50.0, r.center().y), Align2::LEFT_CENTER, text, egui::FontId::proportional(18.0), t.text);
+    resp
+}
+
+fn notify(st: &mut TouchUi, ctx: &egui::Context, text: &str) {
+    let now = ctx.input(|i| i.time);
+    st.notice = Some((text.to_string(), now + 3.5));
+    ctx.request_repaint();
+}
+
+fn show_notice(st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
+    let Some((text, until)) = st.notice.clone() else { return };
+    let now = ctx.input(|i| i.time);
+    if now > until {
+        st.notice = None;
+        return;
+    }
+    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    let max_w = ctx.content_rect().width() * 0.6;
+    egui::Area::new(egui::Id::new("touch-notice")).order(egui::Order::Tooltip).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -28.0)).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(t.card)
+            .stroke(Stroke::new(1.0, t.card_border))
+            .corner_radius(CornerRadius::same(14))
+            .inner_margin(egui::Margin::symmetric(18, 12))
+            .show(ui, |ui| {
+                ui.set_max_width(max_w);
+                ui.label(egui::RichText::new(text).size(17.0).color(t.text));
+            });
+    });
+}
+
+// A wavy stroke with the brush's width (as it looks on the canvas at the current zoom, capped
 /// to the preview's height), opacity, hardness and colour, tapered when pressure sets the width.
 fn stroke_preview(app: &PhotocraftApp, ui: &mut egui::Ui, w: f32, t: &Tokens) {
     let (rect, _) = ui.allocate_exact_size(vec2(w, 100.0), Sense::hover());
@@ -549,20 +840,30 @@ fn menu_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
     let mut close = false;
     egui::Area::new(egui::Id::new("touch-menu")).order(egui::Order::Foreground).fixed_pos(pos2(12.0, BAR_H + 6.0)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
-            ui.set_width(300.0);
+            ui.set_width(320.0);
             ui.spacing_mut().item_spacing.y = 8.0;
             if big_button(ui, "Nuevo lienzo", t).clicked() {
                 new_canvas(app, ctx);
                 close = true;
             }
-            if big_button(ui, "Abrir…", t).clicked() {
-                invoke(app, ctx, "file.open");
+            if big_button(ui, "Abrir imagen…", t).clicked() {
+                open_images(app, st, ctx);
                 close = true;
             }
-            if big_button(ui, "Exportar…", t).clicked() {
-                invoke(app, ctx, "file.export.exportAs");
+            ui.add_space(4.0);
+            if big_button(ui, "Exportar PNG", t).clicked() {
+                export_image(app, st, ctx, "png", false);
                 close = true;
             }
+            if big_button(ui, "Exportar PNG sin fondo", t).clicked() {
+                export_image(app, st, ctx, "png", true);
+                close = true;
+            }
+            if big_button(ui, "Exportar JPG", t).clicked() {
+                export_image(app, st, ctx, "jpg", false);
+                close = true;
+            }
+            ui.add_space(4.0);
             if big_button(ui, "Ajustar a la pantalla", t).clicked() {
                 invoke(app, ctx, "view.fitOnScreen");
                 close = true;
@@ -579,6 +880,254 @@ fn menu_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
     });
     if close {
         st.menu_open = false;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------------------------
+
+/// Export the active document as `ext` (png, jpg) into the export folder, named after it with a
+/// time stamp. `transparent`: without the Background layer, so a PNG keeps only what is drawn
+/// (after Quitar fondo, the subject alone). Without an export folder, the Export As dialog.
+fn export_image(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, ext: &str, transparent: bool) {
+    let Some(dir) = st.export_dir.clone() else {
+        invoke(app, ctx, "file.export.exportAs");
+        return;
+    };
+    let Some(d) = app.session.active() else {
+        notify(st, ctx, "No hay ningún documento abierto");
+        return;
+    };
+    let mut doc = (*d.doc).clone();
+    if transparent && let Some(bg) = doc.background_mut() {
+        bg.visible = false;
+    }
+    let stem: String = doc.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    let stem = stem.split('.').next().filter(|s| !s.is_empty()).unwrap_or("StylusArt").to_string();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let suffix = if transparent { "-sin-fondo" } else { "" };
+    let path = dir.join(format!("{stem}{suffix}-{stamp}.{ext}"));
+    let Some(export) = app.services.export.as_ref() else {
+        notify(st, ctx, "Exportar no está disponible");
+        return;
+    };
+    let settings = crate::ExportSettings { jpeg_quality: Some(92), ..Default::default() };
+    let result = std::fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| export(&doc, &path.to_string_lossy(), &settings))
+        .and_then(|(bytes, _)| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => {
+            let shown = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            notify(st, ctx, &format!("Guardado en Imágenes/StylusArt: {shown}"));
+        }
+        Err(e) => notify(st, ctx, &format!("No se pudo exportar: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Image gallery (open photos)
+// ---------------------------------------------------------------------------------------------
+
+/// Image files the gallery lists, newest first, and their thumbnails as a worker decodes them.
+struct Gallery {
+    items: Vec<(PathBuf, String)>,
+    thumbs: Receiver<(usize, u32, u32, Vec<u8>)>,
+    textures: HashMap<usize, egui::TextureHandle>,
+}
+
+const GALLERY_MAX: usize = 240;
+const THUMB_PX: u32 = 256;
+
+fn open_images(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context) {
+    if st.gallery_dirs.is_empty() {
+        invoke(app, ctx, "file.open");
+        return;
+    }
+    if let Some(ask) = &st.request_media {
+        ask();
+    }
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for dir in &st.gallery_dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "psd" | "pcraft") {
+                let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                files.push((modified, p));
+            }
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(GALLERY_MAX);
+    let items: Vec<(PathBuf, String)> = files.into_iter().map(|(_, p)| {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        (p, name)
+    }).collect();
+    let (tx, rx) = channel();
+    let paths: Vec<PathBuf> = items.iter().map(|(p, _)| p.clone()).collect();
+    let repaint = ctx.clone();
+    let _ = std::thread::Builder::new().name("stylusart-thumbs".into()).spawn(move || {
+        for (i, p) in paths.into_iter().enumerate() {
+            let Some((w, h, rgba)) = thumbnail(&p) else { continue };
+            if tx.send((i, w, h, rgba)).is_err() {
+                return;
+            }
+            repaint.request_repaint();
+        }
+    });
+    st.gallery = Some(Gallery { items, thumbs: rx, textures: HashMap::new() });
+}
+
+/// A small RGBA preview of an image file (box-filtered to at most `THUMB_PX` on a side).
+fn thumbnail(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
+    let ext = path.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let img = photocraft_codecs::decode(&bytes).ok()?;
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let rgba = img.to_rgba8();
+    let step = w.max(h).div_ceil(THUMB_PX).max(1);
+    let (tw, th) = (w.div_ceil(step), h.div_ceil(step));
+    let mut out = vec![0u8; (tw * th * 4) as usize];
+    for ty in 0..th {
+        for tx in 0..tw {
+            let mut acc = [0u32; 4];
+            let mut n = 0u32;
+            for y in (ty * step)..((ty + 1) * step).min(h) {
+                for x in (tx * step)..((tx + 1) * step).min(w) {
+                    let i = ((y * w + x) * 4) as usize;
+                    if let Some(px) = rgba.get(i..i + 4) {
+                        for (a, v) in acc.iter_mut().zip(px) {
+                            *a += u32::from(*v);
+                        }
+                        n += 1;
+                    }
+                }
+            }
+            let o = ((ty * tw + tx) * 4) as usize;
+            if let (Some(dst), true) = (out.get_mut(o..o + 4), n > 0) {
+                for (d, a) in dst.iter_mut().zip(acc) {
+                    *d = (a / n) as u8;
+                }
+            }
+        }
+    }
+    Some((tw, th, out))
+}
+
+fn gallery_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
+    let Some(g) = st.gallery.as_mut() else { return };
+    while let Ok((i, w, h, rgba)) = g.thumbs.try_recv() {
+        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+        g.textures.insert(i, ctx.load_texture(format!("stylusart-thumb-{i}"), img, egui::TextureOptions::LINEAR));
+    }
+    let screen = ctx.content_rect();
+    let rect = screen.shrink2(vec2(screen.width() * 0.08, 0.0)).with_min_y(screen.top() + BAR_H + 12.0).with_max_y(screen.bottom() - 16.0);
+    let mut close = false;
+    let mut open: Option<usize> = None;
+    egui::Area::new(egui::Id::new("touch-gallery")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+        popover_frame(t).show(ui, |ui| {
+            ui.set_width(rect.width() - 32.0);
+            ui.set_height(rect.height() - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Abrir imagen").size(22.0).strong().color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::button_with_icon_size(ui, "x", 44.0, 22.0, false, "Cerrar").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            if g.items.is_empty() {
+                hint(ui, "No hay imágenes en Imágenes, Cámara ni Descargas, o falta el permiso para verlas. Acepta el permiso de fotos y vuelve a abrir esta ventana.", t);
+                return;
+            }
+            let tile = 180.0;
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
+                    for (i, (_, name)) in g.items.iter().enumerate() {
+                        let (r, resp) = ui.allocate_exact_size(vec2(tile, tile + 28.0), Sense::click());
+                        let img_r = Rect::from_min_size(r.min, Vec2::splat(tile));
+                        ui.painter().rect_filled(img_r, CornerRadius::same(10), t.field);
+                        if let Some(tex) = g.textures.get(&i) {
+                            let s = tex.size_vec2();
+                            let k = (tile / s.x).min(tile / s.y);
+                            let fit = Rect::from_center_size(img_r.center(), s * k);
+                            ui.painter().image(tex.id(), fit, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        }
+                        let label: String = name.chars().take(22).collect();
+                        ui.painter().text(pos2(r.left() + 4.0, img_r.bottom() + 14.0), Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), t.text_dim);
+                        if resp.clicked() {
+                            open = Some(i);
+                        }
+                    }
+                });
+            });
+        });
+    });
+    if let Some(i) = open
+        && let Some((path, name)) = g.items.get(i).cloned()
+    {
+        match std::fs::read(&path) {
+            Ok(bytes) => match app.services.inbox.as_ref() {
+                Some(inbox) => {
+                    inbox.lock().unwrap_or_else(PoisonError::into_inner).push((name, bytes));
+                    close = true;
+                }
+                None => notify(st, ctx, "Abrir archivos no está disponible"),
+            },
+            Err(e) => notify(st, ctx, &format!("No se pudo leer {name}: {e}")),
+        }
+    }
+    if close {
+        st.gallery = None;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Layers sheet
+// ---------------------------------------------------------------------------------------------
+
+/// One row of the Layers sheet.
+struct Row {
+    id: u64,
+    name: String,
+    visible: bool,
+    opacity: f32,
+    depth: usize,
+    mask: bool,
+    clipped: bool,
+    group: bool,
+    artboard: bool,
+}
+
+/// The layer tree topmost first, groups (and artboards) followed by their contents, indented.
+fn rows(layers: &[Layer], depth: usize, out: &mut Vec<Row>) {
+    for l in layers.iter().rev() {
+        let (group, artboard) = match &l.content {
+            LayerContent::Group(g) => (true, g.artboard.is_some()),
+            _ => (false, false),
+        };
+        out.push(Row {
+            id: l.id.0,
+            name: l.name.clone(),
+            visible: l.visible,
+            opacity: l.opacity,
+            depth,
+            mask: l.mask.is_some(),
+            clipped: l.clipped,
+            group,
+            artboard,
+        });
+        if let Some(children) = l.children() {
+            rows(children, depth + 1, out);
+        }
     }
 }
 
@@ -608,15 +1157,37 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
                 return;
             };
             let active = d.active_layer.map(|l| l.0);
-            // Topmost first, as in the Layers panel.
-            let rows: Vec<(u64, String, bool, f32)> = d.doc.layers.iter().rev().map(|l| (l.id.0, l.name.clone(), l.visible, l.opacity)).collect();
-            let active_opacity = rows.iter().find(|r| Some(r.0) == active).map(|r| r.3);
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 110.0).show(ui, |ui| {
-                for (id, name, visible, _) in &rows {
-                    layer_row(app, ui, *id, name, *visible, Some(*id) == active, t);
+            let mut list = Vec::new();
+            rows(&d.doc.layers, 0, &mut list);
+            let current = list.iter().find(|r| Some(r.id) == active).map(|r| (r.id, r.opacity, r.mask, r.clipped));
+            let ctx = ui.ctx().clone();
+            // Actions on the active layer.
+            if let Some((id, _, mask, clipped)) = current {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    if chip(ui, "Quitar fondo", false, t).clicked() {
+                        remove_background(app, st, &ctx);
+                    }
+                    if chip(ui, if mask { "Quitar máscara" } else { "Añadir máscara" }, mask, t).clicked() {
+                        let r = app.run(if mask { "layer.layerMask.delete" } else { "layer.layerMask.revealAll" }, json!({}));
+                        if let Err(e) = r {
+                            notify(st, &ctx, &e);
+                        }
+                    }
+                    if chip(ui, "Máscara de recorte", clipped, t).clicked()
+                        && let Err(e) = app.run("layer.setProps", json!({ "layer": id, "clipped": !clipped }))
+                    {
+                        notify(st, &ctx, &e);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+            egui::ScrollArea::vertical().max_height((ui.available_height() - 90.0).max(120.0)).show(ui, |ui| {
+                for r in &list {
+                    layer_row(app, ui, r, Some(r.id) == active, t);
                 }
             });
-            if let (Some(id), Some(op)) = (active, active_opacity) {
+            if let Some((id, op, _, _)) = current {
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("Opacidad de la capa").size(16.0).color(t.text_dim));
                 let mut v = st.opacity_drag.filter(|(l, _)| *l == id).map_or(op, |(_, v)| v) * 100.0;
@@ -639,20 +1210,71 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
         });
 }
 
-fn layer_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: u64, name: &str, visible: bool, selected: bool, t: &Tokens) {
+/// Quitar fondo: Select Subject on the active layer, then a layer mask from that selection (the
+/// Background layer becomes a normal layer first, as masks need one). Hidden pixels stay under
+/// the mask, so painting the mask black or white fixes the edge.
+fn remove_background(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context) {
+    let Some(d) = app.session.active() else { return };
+    let Some(layer) = d.active_layer else {
+        notify(st, ctx, "Elige una capa primero");
+        return;
+    };
+    let is_bg = d.doc.is_background(layer);
+    let has_mask = d.doc.layer(layer).is_some_and(|l| l.mask.is_some());
+    if is_bg && let Err(e) = app.run("layer.new.layerFromBackground", json!({})) {
+        notify(st, ctx, &format!("No se pudo convertir el fondo: {e}"));
+        return;
+    }
+    if has_mask {
+        let _ = app.run("layer.layerMask.delete", json!({}));
+    }
+    if let Err(e) = app.run("select.subject", json!({ "sampleAllLayers": false })) {
+        notify(st, ctx, &format!("No se encontró un sujeto: {e}"));
+        return;
+    }
+    match app.run("layer.layerMask.revealSelection", json!({})) {
+        Ok(_) => {
+            let _ = app.run("select.deselect", json!({}));
+            notify(st, ctx, "Fondo quitado. Exporta con \"Exportar PNG sin fondo\".");
+        }
+        Err(e) => notify(st, ctx, &format!("No se pudo crear la máscara: {e}")),
+    }
+}
+
+fn layer_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, row: &Row, selected: bool, t: &Tokens) {
     let w = ui.available_width();
     let (r, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
     let p = ui.painter();
-    p.rect_filled(r, CornerRadius::same(12), if selected { t.row_selected } else { t.card });
-    let eye = Rect::from_min_size(r.min, vec2(ROW_H, ROW_H));
-    icons::paint(ui, eye, if visible { "eye" } else { "eye-off" }, 26.0, if visible { t.text } else { t.text_faint });
-    p.text(pos2(eye.right() + 4.0, r.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(18.0), t.text);
+    let indent = row.depth as f32 * 18.0;
+    let body = r.with_min_x(r.left() + indent);
+    p.rect_filled(body, CornerRadius::same(12), if selected { t.row_selected } else { t.card });
+    let eye = Rect::from_min_size(body.min, vec2(ROW_H, ROW_H));
+    icons::paint(ui, eye, if row.visible { "eye" } else { "eye-off" }, 26.0, if row.visible { t.text } else { t.text_faint });
+    let mut x = eye.right() + 2.0;
+    let badge = |name: &str, x: f32| icons::paint(ui, Rect::from_center_size(pos2(x + 11.0, r.center().y), Vec2::splat(22.0)), name, 18.0, t.text_dim);
+    if row.clipped {
+        badge("clip-below", x);
+        x += 24.0;
+    }
+    if row.artboard {
+        badge("artboard", x);
+        x += 24.0;
+    } else if row.group {
+        badge("folder", x);
+        x += 24.0;
+    }
+    let name_w = (body.right() - x - (if row.mask { 34.0 } else { 8.0 })).max(20.0);
+    let galley = ui.painter().layout(row.name.clone(), egui::FontId::proportional(17.0), t.text, name_w);
+    ui.painter().galley(pos2(x + 2.0, r.center().y - galley.size().y / 2.0), galley, t.text);
+    if row.mask {
+        icons::paint(ui, Rect::from_center_size(pos2(body.right() - 20.0, r.center().y), Vec2::splat(24.0)), "layer-mask", 20.0, t.text_dim);
+    }
     if resp.clicked() {
         let tap = resp.interact_pointer_pos().unwrap_or(Pos2::ZERO);
         if eye.contains(tap) {
-            run(app, "layer.setProps", json!({ "layer": id, "visible": !visible }));
+            run(app, "layer.setProps", json!({ "layer": row.id, "visible": !row.visible }));
         } else if !selected {
-            run(app, "layer.select", json!({ "layer": id }));
+            run(app, "layer.select", json!({ "layer": row.id }));
         }
     }
     ui.add_space(6.0);

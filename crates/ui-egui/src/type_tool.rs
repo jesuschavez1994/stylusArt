@@ -1653,7 +1653,7 @@ fn drag_key(ctx: &egui::Context) -> Option<String> {
 }
 
 /// Apply only the supplied properties to the text-edit scope or selected type layers.
-fn apply(app: &mut PhotocraftApp, ctx: &egui::Context, props: serde_json::Value) {
+pub(crate) fn apply(app: &mut PhotocraftApp, ctx: &egui::Context, props: serde_json::Value) {
     let Some(mut p) = formatting_params(app) else { return };
     if let Some(props) = props.as_object() {
         for (key, value) in props {

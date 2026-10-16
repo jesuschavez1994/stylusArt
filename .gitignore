@@ -11,3 +11,6 @@ target/
 /craft-fonts
 *.log
 __pycache__/
+
+# StylusArt: bundled fonts, downloaded by apps/stylusart-android/fetch-fonts.sh
+/apps/stylusart-android/assets/fonts/
