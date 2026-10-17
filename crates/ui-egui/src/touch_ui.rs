@@ -228,6 +228,10 @@ fn new_canvas(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let px = ctx.content_rect().size() * ctx.pixels_per_point();
     let (w, h) = (px.x.round().clamp(512.0, 8192.0), px.y.round().clamp(512.0, 8192.0));
     run(app, "file.new", json!({ "width": w, "height": h, "background": "white", "name": "Lienzo" }));
+    // Draw on a layer above the white Background, as in Procreate: erasing then shows the white,
+    // and the layer's opacity can change (the Background has none; changing it would turn it
+    // into a normal layer and the eraser would cut transparent holes).
+    run(app, "layer.new.layer", json!({ "name": "Capa 1" }));
 }
 
 fn run(app: &mut PhotocraftApp, id: &str, params: serde_json::Value) {
@@ -1064,11 +1068,10 @@ fn color_to_hsv(c: Color32, prev: Hsv) -> Hsv {
 /// colour shows everywhere at once while dragging and is set (one command) on release.
 fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
     let screen = ctx.content_rect();
-    let size = vec2(380.0, 560.0);
+    let size = vec2(300.0, 400.0);
     // Below the colour well, right-aligned with it.
     let anchor = st.color_anchor.unwrap_or(pos2(screen.right() - 80.0, BAR_H + 6.0));
     let left = (anchor.x - size.x).max(screen.left() + 8.0);
-    let mut close = false;
     let mut commit: Option<Color32> = None;
     egui::Area::new(egui::Id::new("touch-color")).order(egui::Order::Foreground).fixed_pos(pos2(left, anchor.y)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
@@ -1079,7 +1082,7 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
             let mut dragging = false;
 
             // Saturation (x) / brightness (y) square in the current hue.
-            let (sq, resp) = ui.allocate_exact_size(vec2(w, 230.0), Sense::click_and_drag());
+            let (sq, resp) = ui.allocate_exact_size(vec2(w, 165.0), Sense::click_and_drag());
             let p = ui.painter_at(sq);
             let mut mesh = egui::Mesh::default();
             let n = 24u32;
@@ -1108,10 +1111,10 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
             // Unclipped, so the knob shows whole at the square's edges.
             ui.painter().circle_stroke(knob, 13.0, Stroke::new(3.0, Color32::WHITE));
             ui.painter().circle_stroke(knob, 15.0, Stroke::new(1.5, Color32::from_black_alpha(140)));
-            ui.add_space(14.0);
+            ui.add_space(10.0);
 
             // Hue bar.
-            let (bar, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click_and_drag());
+            let (bar, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click_and_drag());
             let p = ui.painter_at(bar);
             let mut mesh = egui::Mesh::default();
             let steps = 36u32;
@@ -1136,10 +1139,10 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
             let thumb = Rect::from_center_size(pos2(hx, bar.center().y), vec2(14.0, bar.height() + 8.0));
             p.rect_filled(thumb, CornerRadius::same(7), hsv_to_color([hsv[0], 1.0, 1.0]));
             p.rect_stroke(thumb, CornerRadius::same(7), Stroke::new(3.0, Color32::WHITE), StrokeKind::Outside);
-            ui.add_space(14.0);
+            ui.add_space(10.0);
 
             // Old | new.
-            let (pr, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
+            let (pr, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
             let half = pr.width() / 2.0;
             let old_r = Rect::from_min_size(pr.min, vec2(half, pr.height()));
             let new_r = Rect::from_min_size(pos2(pr.left() + half, pr.top()), vec2(half, pr.height()));
@@ -1153,7 +1156,7 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
                 egui::FontId::monospace(15.0),
                 if hsv[2] > 0.6 && hsv[1] < 0.6 { Color32::BLACK } else { Color32::WHITE },
             );
-            ui.add_space(12.0);
+            ui.add_space(8.0);
 
             if dragging {
                 st.picking = Some(hsv);
@@ -1169,37 +1172,30 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
                 if colors.is_empty() {
                     return;
                 }
-                ui.label(egui::RichText::new(label).size(14.0).color(t.text_dim));
+                ui.label(egui::RichText::new(label).size(13.0).color(t.text_dim));
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                     for &col in colors {
-                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::click());
-                        ui.painter().rect_filled(r, CornerRadius::same(21), col);
-                        ui.painter().rect_stroke(r, CornerRadius::same(21), Stroke::new(1.0, t.card_border), StrokeKind::Inside);
+                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+                        ui.painter().rect_filled(r, CornerRadius::same(16), col);
+                        ui.painter().rect_stroke(r, CornerRadius::same(16), Stroke::new(1.0, t.card_border), StrokeKind::Inside);
                         if resp.clicked() {
                             commit = Some(col);
                         }
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(4.0);
             };
             let recent = st.recent.clone();
             swatch_row(ui, &recent, "Recientes");
             let swatches: Vec<Color32> = SWATCHES.iter().map(|s| Color32::from_rgb(s[0], s[1], s[2])).collect();
             swatch_row(ui, &swatches, "Muestras");
-            if big_button(ui, "Listo", t).clicked() {
-                close = true;
-            }
         });
         });
     });
     if let Some(c) = commit {
         set_fg(app, st, c);
         st.hsv = color_to_hsv(c, st.hsv);
-    }
-    if close {
-        st.color_open = false;
-        st.picking = None;
     }
 }
 fn popover_frame(t: &Tokens) -> egui::Frame {
@@ -1543,6 +1539,7 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
             rows(&d.doc.layers, 0, &mut list);
             let current = list.iter().find(|r| Some(r.id) == active).map(|r| (r.id, r.opacity, r.mask, r.clipped));
             let blend = active.and_then(|id| d.doc.layer(photocraft_doc::LayerId(id))).map(|l| l.blend);
+            let is_background = active.is_some_and(|id| d.doc.is_background(photocraft_doc::LayerId(id)));
             let ctx = ui.ctx().clone();
             // Actions on the active layer.
             if let Some((id, _, mask, clipped)) = current {
@@ -1564,7 +1561,9 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
                     }
                 });
                 ui.add_space(8.0);
-                if let Some(mode) = blend {
+                if is_background {
+                    hint(ui, "El Fondo no tiene opacidad ni modo de fusión. Para dibujar y borrar sin tocarlo, añade una capa con +.", t);
+                } else if let Some(mode) = blend {
                     blend_picker(app, st, ui, id, mode, t);
                     ui.add_space(8.0);
                 }
@@ -1574,23 +1573,20 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
                     layer_row(app, ui, r, Some(r.id) == active, t);
                 }
             });
-            if let Some((id, op, _, _)) = current {
+            if let Some((id, op, _, _)) = current.filter(|_| !is_background) {
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new("Opacidad de la capa").size(16.0).color(t.text_dim));
-                let mut v = st.opacity_drag.filter(|(l, _)| *l == id).map_or(op, |(_, v)| v) * 100.0;
-                ui.spacing_mut().slider_width = ui.available_width() - 70.0;
-                ui.spacing_mut().interact_size.y = 40.0;
-                let resp = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %").max_decimals(0));
-                if resp.changed() {
-                    st.opacity_drag = Some((id, v / 100.0));
-                }
-                if let Some((l, val)) = st.opacity_drag
-                    && !resp.dragged()
-                    && !resp.has_focus()
-                {
-                    st.opacity_drag = None;
-                    if (val - op).abs() > f32::EPSILON {
-                        run(app, "layer.setProps", json!({ "layer": l, "opacity": val }));
+                // The touch slider (no number field, so no keyboard pops up and resizes the
+                // screen). Dragging shows the value; the opacity is set once, on release.
+                let shown = st.opacity_drag.filter(|(l, _)| *l == id).map_or(op, |(_, v)| v);
+                caption(ui, "Opacidad de la capa", &format!("{} %", (shown * 100.0).round()), t);
+                match h_slider(ui, shown, SliderFill::Accent, t) {
+                    Some(u) => st.opacity_drag = Some((id, (u * 100.0).round() / 100.0)),
+                    None => {
+                        if let Some((l, val)) = st.opacity_drag.take()
+                            && (val - op).abs() > f32::EPSILON
+                        {
+                            run(app, "layer.setProps", json!({ "layer": l, "opacity": val }));
+                        }
                     }
                 }
             }
@@ -2086,6 +2082,10 @@ fn snap_shape(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context) {
     let pressure = pressures.get(pressures.len() / 2).copied().unwrap_or(1.0);
     let mut new_params = params.clone();
     new_params["points"] = json!(shape.iter().map(|p| [p[0], p[1], pressure]).collect::<Vec<_>>());
+    // Keep the corners sharp: no smoothing on the clean shape.
+    if let Some(b) = new_params.get_mut("brush").filter(|b| b.is_object()) {
+        b["smoothing"] = json!({ "amount": 0.0 });
+    }
     if app.run("history.undo", json!({})).is_err() {
         return;
     }
@@ -2098,8 +2098,170 @@ fn snap_shape(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context) {
     }
 }
 
-/// The clean shape a hand-drawn stroke is closest to: a line, a circle or an ellipse (any angle),
-/// as points to stroke; `None` when it is none of them.
+/// Ramer–Douglas–Peucker: the corners of an open path, within `eps` of every point.
+fn rdp(p: &[[f64; 2]], eps: f64) -> Vec<[f64; 2]> {
+    if p.len() < 3 {
+        return p.to_vec();
+    }
+    let (a, b) = (p[0], p[p.len() - 1]);
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    let dist = |q: &[f64; 2]| if len < 1e-9 { ((q[0] - a[0]).powi(2) + (q[1] - a[1]).powi(2)).sqrt() } else { ((q[0] - a[0]) * dy - (q[1] - a[1]) * dx).abs() / len };
+    let (mut far, mut idx) = (0.0, 0);
+    for (i, q) in p.iter().enumerate().take(p.len() - 1).skip(1) {
+        let d = dist(q);
+        if d > far {
+            far = d;
+            idx = i;
+        }
+    }
+    if far <= eps {
+        return vec![a, b];
+    }
+    let mut left = rdp(&p[..=idx], eps);
+    let right = rdp(&p[idx..], eps);
+    left.pop();
+    left.extend(right);
+    left
+}
+
+fn dist2(a: [f64; 2], b: [f64; 2]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+}
+
+/// Distance from `q` to the segment `a`–`b`.
+fn seg_dist(q: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l2 = dx * dx + dy * dy;
+    let t = if l2 < 1e-12 { 0.0 } else { (((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l2).clamp(0.0, 1.0) };
+    dist2(q, [a[0] + dx * t, a[1] + dy * t])
+}
+
+/// The interior angle (degrees) at `b` between `a` and `c`.
+fn corner_deg(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    let (u, v) = ([a[0] - b[0], a[1] - b[1]], [c[0] - b[0], c[1] - b[1]]);
+    let d = (u[0] * v[0] + u[1] * v[1]) / ((u[0].hypot(u[1]) * v[0].hypot(v[1])).max(1e-9));
+    d.clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// Drop corners that are nearly straight or too close to the previous one (hand jitter).
+fn clean_corners(mut v: Vec<[f64; 2]>, closed: bool, min_gap: f64) -> Vec<[f64; 2]> {
+    loop {
+        let n = v.len();
+        if n < 3 {
+            return v;
+        }
+        let mut removed = false;
+        for i in 0..n {
+            if !closed && (i == 0 || i == n - 1) {
+                continue;
+            }
+            let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
+            if corner_deg(a, b, c) > 160.0 || dist2(a, b) < min_gap {
+                v.remove(i);
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return v;
+        }
+    }
+}
+
+/// Points along the polyline through `v` (closed: back to the first), every ~4 px, so the brush
+/// follows straight edges and keeps the corners sharp.
+fn densify(v: &[[f64; 2]], closed: bool) -> Vec<[f64; 2]> {
+    let mut out = Vec::new();
+    let n = v.len();
+    let segs = if closed { n } else { n.saturating_sub(1) };
+    for i in 0..segs {
+        let (a, b) = (v[i], v[(i + 1) % n]);
+        let steps = (dist2(a, b) / 4.0).ceil().max(1.0) as usize;
+        for k in 0..steps {
+            let f = k as f64 / steps as f64;
+            out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+        }
+    }
+    out.push(if closed { v[0] } else { v[n - 1] });
+    out
+}
+
+/// A closed hand-drawn polygon (3 to 6 corners) or an open polyline (2 to 4 segments): its clean
+/// corners. A quadrilateral with near-right angles becomes an exact rectangle (or square).
+fn fit_polygon(p: &[[f64; 2]], closed: bool, size: f64) -> Option<(&'static str, Vec<[f64; 2]>)> {
+    let eps = 0.06 * size;
+    let corners = if closed {
+        // Split the loop at the point farthest from the start, simplify both halves.
+        let far = (0..p.len()).max_by(|&i, &j| dist2(p[0], p[i]).total_cmp(&dist2(p[0], p[j])))?;
+        let mut a = rdp(&p[..=far], eps);
+        let mut back: Vec<[f64; 2]> = p[far..].to_vec();
+        back.push(p[0]);
+        let b = rdp(&back, eps);
+        a.pop();
+        a.extend(b);
+        a.pop(); // the start again
+        a
+    } else {
+        rdp(p, eps)
+    };
+    let v = clean_corners(corners, closed, 0.08 * size);
+    let n = v.len();
+    let ok = if closed { (3..=6).contains(&n) } else { (3..=5).contains(&n) };
+    if !ok {
+        return None;
+    }
+    // Every drawn point near the polygon.
+    let segs = if closed { n } else { n - 1 };
+    let err = p.iter().map(|&q| (0..segs).map(|i| seg_dist(q, v[i], v[(i + 1) % n])).fold(f64::MAX, f64::min)).sum::<f64>() / p.len() as f64;
+    if err > 0.035 * size {
+        return None;
+    }
+    if !closed {
+        return Some(("línea quebrada", densify(&v, false)));
+    }
+    if n == 4 && (0..4).all(|i| (corner_deg(v[(i + 3) % 4], v[i], v[(i + 1) % 4]) - 90.0).abs() < 18.0) {
+        // An exact rectangle on the axes of its longest side.
+        let (i, _) = (0..4).map(|i| (i, dist2(v[i], v[(i + 1) % 4]))).max_by(|a, b| a.1.total_cmp(&b.1))?;
+        let ang = (v[(i + 1) % 4][1] - v[i][1]).atan2(v[(i + 1) % 4][0] - v[i][0]);
+        let (c, s) = (ang.cos(), ang.sin());
+        let (mut umin, mut umax, mut wmin, mut wmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for q in &v {
+            let (u, w) = (q[0] * c + q[1] * s, -q[0] * s + q[1] * c);
+            umin = umin.min(u);
+            umax = umax.max(u);
+            wmin = wmin.min(w);
+            wmax = wmax.max(w);
+        }
+        let (mut hw, mut hh) = ((umax - umin) / 2.0, (wmax - wmin) / 2.0);
+        let (cu, cw) = ((umax + umin) / 2.0, (wmax + wmin) / 2.0);
+        let name = if (hw - hh).abs() / hw.max(hh) < 0.12 {
+            let m = (hw + hh) / 2.0;
+            hw = m;
+            hh = m;
+            "cuadrado"
+        } else {
+            "rectángulo"
+        };
+        let to_xy = |u: f64, w: f64| [u * c - w * s, u * s + w * c];
+        let rect = vec![to_xy(cu - hw, cw - hh), to_xy(cu + hw, cw - hh), to_xy(cu + hw, cw + hh), to_xy(cu - hw, cw + hh)];
+        // Start at the corner nearest where the stroke began.
+        let k = (0..4).min_by(|&a, &b| dist2(rect[a], p[0]).total_cmp(&dist2(rect[b], p[0])))?;
+        let ordered: Vec<[f64; 2]> = (0..4).map(|j| rect[(k + j) % 4]).collect();
+        return Some((name, densify(&ordered, true)));
+    }
+    let name = match n {
+        3 => "triángulo",
+        4 => "cuadrilátero",
+        5 => "pentágono",
+        _ => "hexágono",
+    };
+    Some((name, densify(&v, true)))
+}
+
+/// The clean shape a hand-drawn stroke is closest to: a line, a polyline, a polygon (triangle,
+/// rectangle, square…), a circle or an ellipse (any angle), as points to stroke; `None` when it is
+/// none of them.
 fn fit_shape(pts: &[[f64; 3]]) -> Option<(&'static str, Vec<[f64; 2]>)> {
     if pts.len() < 8 {
         return None;
@@ -2123,7 +2285,6 @@ fn fit_shape(pts: &[[f64; 3]]) -> Option<(&'static str, Vec<[f64; 2]>)> {
                 [first[0] + (last[0] - first[0]) * f, first[1] + (last[1] - first[1]) * f]
             }).collect()));
         }
-        return None;
     }
     // A closed shape: the ends meet (within a fifth of the size).
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -2134,7 +2295,15 @@ fn fit_shape(pts: &[[f64; 3]]) -> Option<(&'static str, Vec<[f64; 2]>)> {
         maxy = maxy.max(q[1]);
     }
     let size = (maxx - minx).max(maxy - miny);
-    if size < 12.0 || chord > 0.25 * size {
+    if size < 12.0 {
+        return None;
+    }
+    let closed = chord <= 0.25 * size;
+    // Corners first: a polygon or polyline (a circle simplifies to 7+ corners and falls through).
+    if let Some(found) = fit_polygon(&p, closed, size) {
+        return Some(found);
+    }
+    if !closed {
         return None;
     }
     // Principal axes of the points: the ellipse's angle; its radii from the extents along them.
@@ -2241,6 +2410,42 @@ mod shape_tests {
         let (name, shape) = fit_shape(&pts).expect("a line");
         assert_eq!(name, "línea");
         assert_eq!(shape.first().copied(), Some([100.0, 200.0 + 4.0 * wobble(0)]));
+    }
+
+    fn loop_through(corners: &[[f64; 2]], per_side: usize) -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for i in 0..corners.len() {
+            let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+            for k in 0..per_side {
+                let f = k as f64 / per_side as f64;
+                out.push([a[0] + (b[0] - a[0]) * f + 3.0 * wobble(out.len()), a[1] + (b[1] - a[1]) * f + 3.0 * wobble(out.len() + 5), 1.0]);
+            }
+        }
+        out.push([corners[0][0] + 6.0, corners[0][1] + 4.0, 1.0]);
+        out
+    }
+
+    #[test]
+    fn a_hand_drawn_square_becomes_a_square() {
+        let pts = loop_through(&[[100.0, 100.0], [400.0, 104.0], [398.0, 402.0], [102.0, 398.0]], 30);
+        let (name, shape) = fit_shape(&pts).expect("a square");
+        assert_eq!(name, "cuadrado");
+        assert!(shape.len() > 100, "densified edges");
+    }
+
+    #[test]
+    fn a_hand_drawn_rectangle_and_triangle() {
+        let rect = loop_through(&[[100.0, 100.0], [600.0, 100.0], [600.0, 300.0], [100.0, 300.0]], 30);
+        assert_eq!(fit_shape(&rect).map(|s| s.0), Some("rectángulo"));
+        let tri = loop_through(&[[300.0, 100.0], [500.0, 420.0], [100.0, 420.0]], 40);
+        assert_eq!(fit_shape(&tri).map(|s| s.0), Some("triángulo"));
+    }
+
+    #[test]
+    fn an_open_v_becomes_a_polyline() {
+        let mut v: Vec<[f64; 3]> = (0..=40).map(|k| [100.0 + k as f64 * 5.0, 100.0 + k as f64 * 8.0 + 2.0 * wobble(k), 1.0]).collect();
+        v.extend((1..=40).map(|k| [300.0 + k as f64 * 5.0, 420.0 - k as f64 * 8.0 + 2.0 * wobble(k + 3), 1.0]));
+        assert_eq!(fit_shape(&v).map(|s| s.0), Some("línea quebrada"));
     }
 
     #[test]
