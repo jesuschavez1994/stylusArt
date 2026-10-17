@@ -93,6 +93,14 @@ impl eframe::App for Shell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // The part of the window the system bars cover at the bottom: the content rect Android
+        // reports ends above the navigation bar. Popovers and the tool rail keep clear of it.
+        let ppp = ui.ctx().pixels_per_point().max(0.1);
+        let window_bottom = ui.ctx().content_rect().bottom() * ppp;
+        let content = self.android.content_rect();
+        if content.bottom > 0 {
+            photocraft_ui_egui::touch_ui::set_safe_bottom((window_bottom - content.bottom as f32).max(0.0) / ppp);
+        }
         self.app.ui(ui, frame);
         // Show the keyboard while text is typed: an inline type edit or a focused text field.
         let wants = self.app.ui.text_edit.is_some() || ui.ctx().egui_wants_keyboard_input();

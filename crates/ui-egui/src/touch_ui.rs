@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -106,6 +106,15 @@ pub struct TouchUi {
     recent: Vec<Color32>,
     /// The brush library sheet is open, and its search text.
     pub library_open: bool,
+    /// The rail's Lápiz is active (the Brush tool with its graphite brush), and the brushes the
+    /// Lápiz and the Pincel keep while the other one is in use.
+    pencil_mode: bool,
+    pencil_brush: Option<photocraft_engine::paint::brush::BrushSettings>,
+    brush_brush: Option<photocraft_engine::paint::brush::BrushSettings>,
+    /// The Eraser got its own brush (hard, full opacity) the first time it was picked.
+    eraser_ready: bool,
+    /// A drag inside the selection switched to the Move tool; the selection tool to return to.
+    spring_back: Option<Tool>,
     /// The Layers sheet's blend mode list is open.
     blend_open: bool,
     /// The Transform popover is open, and where (beside its rail button).
@@ -118,6 +127,26 @@ impl TouchUi {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// Height (points) the system navigation bar covers at the bottom of the window, as the platform
+/// shell reports it.
+static SAFE_BOTTOM: AtomicU32 = AtomicU32::new(0);
+
+/// The platform shell reports how much of the bottom edge the system bars cover (points).
+pub fn set_safe_bottom(points: f32) {
+    SAFE_BOTTOM.store(points.max(0.0).to_bits(), Ordering::Relaxed);
+}
+
+/// Room to leave at the bottom: the system bar, and never less than a comfortable margin above
+/// the gesture area.
+fn safe_bottom() -> f32 {
+    f32::from_bits(SAFE_BOTTOM.load(Ordering::Relaxed)).clamp(28.0, 160.0)
+}
+
+/// Height a popover's content may take below `ui`'s top before the safe bottom; it scrolls past it.
+fn popover_room(ui: &egui::Ui) -> f32 {
+    (ui.ctx().content_rect().bottom() - safe_bottom() - ui.max_rect().top() - 24.0).max(160.0)
 }
 
 /// Draw the touch chrome (top bar, tool rail, Layers sheet, popovers). Call before the canvas'
@@ -139,6 +168,8 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     dismiss_on_outside_tap(&mut st, ui.ctx());
     run_gestures(app, ui.ctx());
+    drag_selection(app, &mut st, ui.ctx());
+    snap_shape(app, &mut st, ui.ctx());
     top_bar(app, &mut st, ui, &t);
     tool_rail(app, &mut st, ui, &t);
     if st.layers_open {
@@ -254,24 +285,25 @@ fn top_bar(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tok
 }
 
 fn tool_rail(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
+    // Room under the last button for the system navigation bar.
+    let bottom = (10.0 + safe_bottom()).min(120.0) as i8;
     egui::Panel::left("touch-tools")
         .resizable(false)
         .exact_size(RAIL_W)
-        .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(13, 10)))
+        .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin { left: 13, right: 13, top: 10, bottom }))
         .show(ui, |ui| {
             egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 for &(tool, tip) in TOOLS {
-                    let selected = app.ui.tool == tool;
+                    let selected = rail_selected(app, st, tool);
                     let resp = icon_button(ui, icons::tool_icon(tool), selected, tip);
                     if resp.clicked() {
                         if selected {
-                            // A second tap on the active tool opens its brush settings (as in
-                            // Samsung Notes and Procreate).
+                            // A second tap on the active tool opens its settings (as in Samsung
+                            // Notes and Procreate).
                             toggle_brush(st, resp.rect);
                         } else {
-                            crate::tool_memory::select(app, tool);
-                            crate::paint_mouse::sync_tool_brush(app);
+                            pick_rail_tool(app, st, tool);
                             st.brush_open = false;
                         }
                     }
@@ -293,13 +325,78 @@ fn tool_rail(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &T
         });
 }
 
+/// The rail's Lápiz is the Brush tool with a graphite brush of its own (the Pencil tool paints
+/// aliased, hard pixels, which on a tablet look just like the Brush); Pincel is the Brush tool with
+/// its own brush.
+fn rail_selected(app: &PhotocraftApp, st: &TouchUi, entry: Tool) -> bool {
+    match entry {
+        Tool::Pencil => app.ui.tool == Tool::Brush && st.pencil_mode,
+        Tool::Brush => app.ui.tool == Tool::Brush && !st.pencil_mode,
+        other => app.ui.tool == other,
+    }
+}
+
+/// The name the active tool shows (Lápiz for the pencil mode of the Brush).
+fn active_tool_name(app: &PhotocraftApp, st: &TouchUi) -> &'static str {
+    if app.ui.tool == Tool::Brush && st.pencil_mode { "Lápiz" } else { tool_name(app.ui.tool) }
+}
+
+/// Put `b` in as the live brush, keeping the session's colours and erase flag.
+fn set_live_brush(app: &mut PhotocraftApp, mut b: photocraft_engine::paint::brush::BrushSettings) {
+    let cur = &app.session.tools.brush;
+    b.color = cur.color;
+    b.background = cur.background;
+    b.color_cmyk = cur.color_cmyk;
+    b.erase = cur.erase;
+    app.session.tools.brush = b;
+    app.session.tools.brush_changed();
+}
+
+fn pick_rail_tool(app: &mut PhotocraftApp, st: &mut TouchUi, entry: Tool) {
+    let want_pencil = entry == Tool::Pencil;
+    let target = if want_pencil { Tool::Brush } else { entry };
+    let in_pencil = st.pencil_mode && app.ui.tool == Tool::Brush;
+    // Leaving the pencil: keep its brush and bring the Brush's own back first, so the tool switch
+    // saves the Brush's (not the pencil's) settings.
+    if in_pencil && !want_pencil {
+        st.pencil_brush = Some(app.session.tools.brush.clone());
+        if let Some(b) = st.brush_brush.take() {
+            set_live_brush(app, b);
+        }
+        st.pencil_mode = false;
+    }
+    if app.ui.tool != target {
+        crate::tool_memory::select(app, target);
+        crate::paint_mouse::sync_tool_brush(app);
+    }
+    if want_pencil && !in_pencil {
+        st.brush_brush = Some(app.session.tools.brush.clone());
+        match st.pencil_brush.clone() {
+            Some(b) => set_live_brush(app, b),
+            // Graphite on paper: textured, pressure sets the width and the darkness.
+            None => run(app, "tools.setBrush", json!({ "preset": "Soft Pencil" })),
+        }
+        st.pencil_mode = true;
+    }
+    // The first time, the Eraser takes the brush it had last (whatever was painting before): a
+    // soft or pressure-opacity brush then only fades strokes. Start it as a real eraser.
+    if entry == Tool::Eraser && !st.eraser_ready {
+        st.eraser_ready = true;
+        run(app, "tools.setBrush", json!({ "preset": "Hard Round" }));
+        run(
+            app,
+            "tools.setBrush",
+            json!({ "brush": { "size": 40.0, "opacity": 1.0, "flow": 1.0, "hardness": 1.0, "pressureOpacity": false, "pressureSize": false, "spacing": 0.15, "smoothing": { "amount": 0.0 } } }),
+        );
+    }
+}
+
 fn toggle_brush(st: &mut TouchUi, button: Rect) {
     st.brush_open = !st.brush_open;
     st.brush_anchor = Some(pos2(button.right() + 22.0, button.top()));
     st.color_open = false;
     st.menu_open = false;
 }
-
 fn fmt_size(s: f32) -> String {
     if s < 10.0 { format!("{s:.1}") } else { format!("{}", s.round()) }
 }
@@ -321,14 +418,15 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
     };
     let anchor = st.brush_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
     let lo = screen.top() + BAR_H + 6.0;
-    let top = anchor.y.clamp(lo, (screen.bottom() - height - 8.0).max(lo));
+    let top = anchor.y.clamp(lo, (screen.bottom() - safe_bottom() - height - 8.0).max(lo));
     let mut close = false;
     egui::Area::new(egui::Id::new("touch-brush")).order(egui::Order::Foreground).fixed_pos(pos2(anchor.x, top)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
             let w = BRUSH_POP_W - 32.0;
             ui.set_width(w);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tool_name(tool)).size(20.0).strong().color(t.text));
+                ui.label(egui::RichText::new(active_tool_name(app, st)).size(20.0).strong().color(t.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::button_with_icon_size(ui, "x", 40.0, 20.0, false, "Cerrar").clicked() {
                         close = true;
@@ -344,6 +442,7 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
                 Tool::Artboard => artboard_options(app, st, ui, t),
                 other => hint(ui, tool_hint(other), t),
             }
+        });
         });
     });
     if close {
@@ -386,7 +485,11 @@ fn brush_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, w
         let s = SLIDER_MAX_SIZE.powf(u).clamp(1.0, SLIDER_MAX_SIZE);
         let s = if s < 10.0 { (s * 10.0).round() / 10.0 } else { s.round() };
         if s != b.size {
-            run(app, "tools.setBrush", json!({ "brush": { "size": s }, "coalesce": "touch-size" }));
+            // Big brushes space their dabs further apart: each dab of a 500 px brush covers
+            // 250 000 pixels, and at 10 % spacing a quick stroke paints dozens per frame.
+            let spacing = if s > 150.0 { 0.2 } else if s > 60.0 { 0.15 } else { b.spacing };
+            let brush = if spacing > b.spacing { json!({ "size": s, "spacing": spacing }) } else { json!({ "size": s }) };
+            run(app, "tools.setBrush", json!({ "brush": brush, "coalesce": "touch-size" }));
         }
     }
     ui.add_space(10.0);
@@ -681,7 +784,7 @@ fn symmetry_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui
 fn brush_library(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
     let screen = ctx.content_rect();
     let width = 560.0_f32.min(screen.width() - RAIL_W - 40.0);
-    let rect = Rect::from_min_size(pos2(RAIL_W + 12.0, screen.top() + BAR_H + 10.0), vec2(width, screen.height() - BAR_H - 26.0));
+    let rect = Rect::from_min_size(pos2(RAIL_W + 12.0, screen.top() + BAR_H + 10.0), vec2(width, screen.height() - BAR_H - 16.0 - safe_bottom()));
     let mut close = false;
     let mut pick: Option<String> = None;
     let color = fg_color(app);
@@ -969,6 +1072,7 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
     let mut commit: Option<Color32> = None;
     egui::Area::new(egui::Id::new("touch-color")).order(egui::Order::Foreground).fixed_pos(pos2(left, anchor.y)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
             let w = size.x - 32.0;
             ui.set_width(w);
             let mut hsv = st.picking.unwrap_or(st.hsv);
@@ -1087,6 +1191,7 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
                 close = true;
             }
         });
+        });
     });
     if let Some(c) = commit {
         set_fg(app, st, c);
@@ -1119,6 +1224,7 @@ fn menu_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
     let mut close = false;
     egui::Area::new(egui::Id::new("touch-menu")).order(egui::Order::Foreground).fixed_pos(pos2(12.0, BAR_H + 6.0)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
             ui.set_width(320.0);
             ui.spacing_mut().item_spacing.y = 8.0;
             if big_button(ui, "Nuevo lienzo", t).clicked() {
@@ -1151,6 +1257,7 @@ fn menu_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
             if big_button(ui, if finger { "Dibujar con el dedo: Sí" } else { "Dibujar con el dedo: No" }, t).clicked() {
                 FINGER_PAINT.store(!finger, Ordering::Relaxed);
             }
+        });
         });
     });
     if close {
@@ -1302,7 +1409,7 @@ fn gallery_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
         g.textures.insert(i, ctx.load_texture(format!("stylusart-thumb-{i}"), img, egui::TextureOptions::LINEAR));
     }
     let screen = ctx.content_rect();
-    let rect = screen.shrink2(vec2(screen.width() * 0.08, 0.0)).with_min_y(screen.top() + BAR_H + 12.0).with_max_y(screen.bottom() - 16.0);
+    let rect = screen.shrink2(vec2(screen.width() * 0.08, 0.0)).with_min_y(screen.top() + BAR_H + 12.0).with_max_y(screen.bottom() - safe_bottom());
     let mut close = false;
     let mut open: Option<usize> = None;
     egui::Area::new(egui::Id::new("touch-gallery")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
@@ -1410,7 +1517,7 @@ fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t:
     egui::Panel::right("touch-layers")
         .resizable(false)
         .exact_size(LAYERS_W)
-        .frame(egui::Frame::NONE.fill(t.dock).inner_margin(egui::Margin::same(12)))
+        .frame(egui::Frame::NONE.fill(t.dock).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: (12.0 + safe_bottom()).min(120.0) as i8 }))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Capas").size(22.0).strong().color(t.text));
@@ -1620,6 +1727,8 @@ struct Gestures {
     /// Pens touching or hovering.
     pens: Vec<u64>,
     last_pen: Option<std::time::Instant>,
+    /// The pen's last resting point, since when it has rested there, and when the stroke began.
+    pen_rest: Option<(Pos2, std::time::Instant, std::time::Instant)>,
     /// The current multi-finger gesture: when it started, most fingers seen, whether it moved.
     started: Option<std::time::Instant>,
     max_fingers: usize,
@@ -1643,12 +1752,35 @@ fn run_gestures(app: &mut PhotocraftApp, ctx: &egui::Context) {
         if e.pen {
             g.last_pen = Some(at);
             match e.phase {
-                TouchPhase::Start | TouchPhase::Move => {
+                TouchPhase::Start => {
                     if !g.pens.contains(&e.id) {
                         g.pens.push(e.id);
                     }
+                    g.pen_rest = Some((e.pos, at, at));
                 }
-                TouchPhase::End | TouchPhase::Cancel => g.pens.retain(|p| *p != e.id),
+                TouchPhase::Move => {
+                    if !g.pens.contains(&e.id) {
+                        g.pens.push(e.id);
+                    }
+                    // Where the pen last moved to, and when; a few points of jitter count as still.
+                    match g.pen_rest {
+                        Some((p, since, began)) if (e.pos - p).length() < 4.0 => g.pen_rest = Some((p, since, began)),
+                        Some((_, _, began)) => g.pen_rest = Some((e.pos, at, began)),
+                        None => g.pen_rest = Some((e.pos, at, at)),
+                    }
+                }
+                TouchPhase::End => {
+                    g.pens.retain(|p| *p != e.id);
+                    if let Some((_, since, began)) = g.pen_rest.take()
+                        && at.duration_since(began).as_secs_f32() > 0.25
+                    {
+                        request_shape(app, at.duration_since(since).as_secs_f32());
+                    }
+                }
+                TouchPhase::Cancel => {
+                    g.pens.retain(|p| *p != e.id);
+                    g.pen_rest = None;
+                }
             }
             continue;
         }
@@ -1819,10 +1951,11 @@ fn transform_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Cont
     let anchor = st.transform_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
     let height = 420.0;
     let lo = screen.top() + BAR_H + 6.0;
-    let top = anchor.y.clamp(lo, (screen.bottom() - height - 8.0).max(lo));
+    let top = anchor.y.clamp(lo, (screen.bottom() - safe_bottom() - height - 8.0).max(lo));
     let mut close = false;
     egui::Area::new(egui::Id::new("touch-transform")).order(egui::Order::Foreground).fixed_pos(pos2(anchor.x, top)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
             ui.set_width(BRUSH_POP_W - 32.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Transformar").size(20.0).strong().color(t.text));
@@ -1852,8 +1985,267 @@ fn transform_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Cont
                 }
             }
         });
+        });
     });
     if close {
         st.transform_open = false;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Drag a selection: with a selection tool, a press inside the selection moves what is selected
+// (the Move tool, just for that drag), as on iPad apps; a press outside starts a new selection.
+// ---------------------------------------------------------------------------------------------
+
+const SELECTION_TOOLS: &[Tool] =
+    &[Tool::Lasso, Tool::PolygonLasso, Tool::MagneticLasso, Tool::RectMarquee, Tool::EllipseMarquee, Tool::QuickSelection, Tool::MagicWand, Tool::ObjectSelection];
+
+/// The document point under a screen point of the canvas (points), for the active view.
+fn doc_point(app: &PhotocraftApp, ctx: &egui::Context, pos: Pos2) -> Option<[f64; 2]> {
+    let i = app.session.active_index()?;
+    let rect = (*CANVAS_RECT.lock().unwrap_or_else(PoisonError::into_inner))?;
+    let view = app.ui.views.get(i)?;
+    let ppp = ctx.pixels_per_point().max(0.1);
+    let xf = crate::canvas::ViewXform { rect, zoom: view.zoom / ppp, center: view.center, flip: app.ui.view.flip_horizontal, rotation: view.rotation, aspect: 1.0 };
+    Some(xf.to_doc(pos))
+}
+
+fn drag_selection(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context) {
+    let (pressed, down, released, pos) = ctx.input(|i| (i.pointer.any_pressed(), i.pointer.any_down(), i.pointer.any_released(), i.pointer.interact_pos()));
+    if let Some(prev) = st.spring_back {
+        // Back to the selection tool once the drag has ended (not on the release frame: the Move
+        // tool still has to finish the move then).
+        if !down && !released && !pressed {
+            st.spring_back = None;
+            crate::tool_memory::select(app, prev);
+        }
+        return;
+    }
+    if !pressed || !SELECTION_TOOLS.contains(&app.ui.tool) {
+        return;
+    }
+    let Some(pos) = pos else { return };
+    let on_canvas = CANVAS_RECT.lock().unwrap_or_else(PoisonError::into_inner).is_some_and(|r| r.contains(pos));
+    if !on_canvas || ctx.layer_id_at(pos).is_some_and(|l| l.order != egui::Order::Background) {
+        return;
+    }
+    let Some([x, y]) = doc_point(app, ctx, pos) else { return };
+    let inside = app.session.active().and_then(|d| d.doc.selection.as_ref()).is_some_and(|sel| sel.sample_channel(x.floor() as i32, y.floor() as i32, 0) > 0.5);
+    if inside {
+        st.spring_back = Some(app.ui.tool);
+        crate::tool_memory::select(app, Tool::Move);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shape snap: end a stroke by holding the pen still for a moment and a hand-drawn circle,
+// ellipse or line is redrawn as a clean one with the same brush (Procreate's QuickShape).
+// ---------------------------------------------------------------------------------------------
+
+/// How long the pen must rest at the end of a stroke to ask for a shape.
+const HOLD_SECS: f32 = 0.45;
+
+/// A pen stroke ended with a hold: the journal length when it was asked, and when.
+static SHAPE_REQUEST: Mutex<Option<(usize, std::time::Instant)>> = Mutex::new(None);
+
+/// Called by the gestures when a pen lifts after resting `held` seconds at the end of a stroke.
+fn request_shape(app: &PhotocraftApp, held: f32) {
+    if held >= HOLD_SECS {
+        *SHAPE_REQUEST.lock().unwrap_or_else(PoisonError::into_inner) = Some((app.session.journal.len(), std::time::Instant::now()));
+    }
+}
+
+/// Once the held stroke has been committed, replace it with the shape it was drawn as.
+fn snap_shape(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context) {
+    let Some((len, at)) = *SHAPE_REQUEST.lock().unwrap_or_else(PoisonError::into_inner) else { return };
+    if at.elapsed().as_secs_f32() > 1.5 {
+        *SHAPE_REQUEST.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        return;
+    }
+    let Some((id, params)) = app.session.journal.last().cloned() else { return };
+    if app.session.journal.len() <= len {
+        ctx.request_repaint();
+        return; // not committed yet
+    }
+    *SHAPE_REQUEST.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    if !matches!(id.as_str(), "paint.stroke" | "paint.pencil") {
+        return;
+    }
+    let Some(raw) = params.get("points").and_then(|v| v.as_array()) else { return };
+    let pts: Vec<[f64; 3]> = raw
+        .iter()
+        .filter_map(|p| {
+            let a = p.as_array()?;
+            Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2).and_then(|v| v.as_f64()).unwrap_or(1.0)])
+        })
+        .collect();
+    let Some((name, shape)) = fit_shape(&pts) else { return };
+    // Keep the stroke's typical pressure along the clean shape.
+    let mut pressures: Vec<f64> = pts.iter().map(|p| p[2]).collect();
+    pressures.sort_by(f64::total_cmp);
+    let pressure = pressures.get(pressures.len() / 2).copied().unwrap_or(1.0);
+    let mut new_params = params.clone();
+    new_params["points"] = json!(shape.iter().map(|p| [p[0], p[1], pressure]).collect::<Vec<_>>());
+    if app.run("history.undo", json!({})).is_err() {
+        return;
+    }
+    match app.run(&id, new_params) {
+        Ok(_) => notify(st, ctx, &format!("Forma ajustada: {name}")),
+        Err(e) => {
+            let _ = app.run("history.redo", json!({}));
+            notify(st, ctx, &e);
+        }
+    }
+}
+
+/// The clean shape a hand-drawn stroke is closest to: a line, a circle or an ellipse (any angle),
+/// as points to stroke; `None` when it is none of them.
+fn fit_shape(pts: &[[f64; 3]]) -> Option<(&'static str, Vec<[f64; 2]>)> {
+    if pts.len() < 8 {
+        return None;
+    }
+    let p: Vec<[f64; 2]> = pts.iter().map(|q| [q[0], q[1]]).collect();
+    let length: f64 = p.windows(2).map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt()).sum();
+    let first = p[0];
+    let last = p[p.len() - 1];
+    let chord = ((last[0] - first[0]).powi(2) + (last[1] - first[1]).powi(2)).sqrt();
+    if length < 20.0 {
+        return None;
+    }
+    // A line: every point close to the segment between the ends.
+    if chord > 0.85 * length {
+        let (dx, dy) = ((last[0] - first[0]) / chord, (last[1] - first[1]) / chord);
+        let dev = p.iter().map(|q| ((q[0] - first[0]) * dy - (q[1] - first[1]) * dx).abs()).fold(0.0, f64::max);
+        if dev < (0.04 * chord).max(3.0) {
+            let n = 48;
+            return Some(("línea", (0..=n).map(|k| {
+                let f = k as f64 / n as f64;
+                [first[0] + (last[0] - first[0]) * f, first[1] + (last[1] - first[1]) * f]
+            }).collect()));
+        }
+        return None;
+    }
+    // A closed shape: the ends meet (within a fifth of the size).
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for q in &p {
+        minx = minx.min(q[0]);
+        miny = miny.min(q[1]);
+        maxx = maxx.max(q[0]);
+        maxy = maxy.max(q[1]);
+    }
+    let size = (maxx - minx).max(maxy - miny);
+    if size < 12.0 || chord > 0.25 * size {
+        return None;
+    }
+    // Principal axes of the points: the ellipse's angle; its radii from the extents along them.
+    let n = p.len() as f64;
+    let (mx, my) = (p.iter().map(|q| q[0]).sum::<f64>() / n, p.iter().map(|q| q[1]).sum::<f64>() / n);
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for q in &p {
+        let (dx, dy) = (q[0] - mx, q[1] - my);
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
+    }
+    let angle = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let (c, s) = (angle.cos(), angle.sin());
+    let (mut umin, mut umax, mut vmin, mut vmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for q in &p {
+        let (u, v) = ((q[0] - mx) * c + (q[1] - my) * s, -(q[0] - mx) * s + (q[1] - my) * c);
+        umin = umin.min(u);
+        umax = umax.max(u);
+        vmin = vmin.min(v);
+        vmax = vmax.max(v);
+    }
+    let (a, b) = ((umax - umin) / 2.0, (vmax - vmin) / 2.0);
+    if a < 4.0 || b < 4.0 {
+        return None;
+    }
+    let (cu, cv) = ((umax + umin) / 2.0, (vmax + vmin) / 2.0);
+    let (cx, cy) = (mx + cu * c - cv * s, my + cu * s + cv * c);
+    // How far the points stray from that ellipse (0 = on it).
+    let err = p
+        .iter()
+        .map(|q| {
+            let (u, v) = ((q[0] - cx) * c + (q[1] - cy) * s, -(q[0] - cx) * s + (q[1] - cy) * c);
+            ((u / a).powi(2) + (v / b).powi(2)).sqrt() - 1.0
+        })
+        .map(f64::abs)
+        .sum::<f64>()
+        / n;
+    if err > 0.12 {
+        return None;
+    }
+    // Nearly round: a circle.
+    let (name, a, b) = if (a / b).max(b / a) < 1.15 {
+        let r = (a + b) / 2.0;
+        ("círculo", r, r)
+    } else {
+        ("elipse", a, b)
+    };
+    let steps = 96;
+    let start = (first[1] - cy).atan2(first[0] - cx);
+    Some((
+        name,
+        (0..=steps)
+            .map(|k| {
+                let t = start + std::f64::consts::TAU * k as f64 / steps as f64;
+                let (u, v) = (a * t.cos(), b * t.sin());
+                [cx + u * c - v * s, cy + u * s + v * c]
+            })
+            .collect(),
+    ))
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::fit_shape;
+
+    fn wobble(k: usize) -> f64 {
+        ((k * 7919) % 13) as f64 / 13.0 - 0.5
+    }
+
+    #[test]
+    fn a_hand_drawn_circle_becomes_a_circle() {
+        let pts: Vec<[f64; 3]> = (0..=120)
+            .map(|k| {
+                let t = std::f64::consts::TAU * k as f64 / 120.0 * 0.97;
+                let r = 200.0 + 6.0 * wobble(k);
+                [500.0 + r * t.cos(), 400.0 + r * t.sin(), 0.6]
+            })
+            .collect();
+        let (name, shape) = fit_shape(&pts).expect("a circle");
+        assert_eq!(name, "círculo");
+        for p in &shape {
+            let r = ((p[0] - 500.0).powi(2) + (p[1] - 400.0).powi(2)).sqrt();
+            assert!((r - 200.0).abs() < 8.0, "radius {r}");
+        }
+    }
+
+    #[test]
+    fn a_tilted_ellipse_stays_an_ellipse() {
+        let (a, b, ang) = (260.0f64, 120.0f64, 0.6f64);
+        let pts: Vec<[f64; 3]> = (0..=150)
+            .map(|k| {
+                let t = std::f64::consts::TAU * k as f64 / 150.0 * 0.98;
+                let (u, v) = (a * t.cos(), b * t.sin());
+                [300.0 + u * ang.cos() - v * ang.sin(), 300.0 + u * ang.sin() + v * ang.cos(), 1.0]
+            })
+            .collect();
+        assert_eq!(fit_shape(&pts).map(|s| s.0), Some("elipse"));
+    }
+
+    #[test]
+    fn a_shaky_line_becomes_straight() {
+        let pts: Vec<[f64; 3]> = (0..=60).map(|k| [100.0 + k as f64 * 10.0, 200.0 + k as f64 * 3.0 + 4.0 * wobble(k), 1.0]).collect();
+        let (name, shape) = fit_shape(&pts).expect("a line");
+        assert_eq!(name, "línea");
+        assert_eq!(shape.first().copied(), Some([100.0, 200.0 + 4.0 * wobble(0)]));
+    }
+
+    #[test]
+    fn a_scribble_is_left_alone() {
+        let pts: Vec<[f64; 3]> = (0..=80).map(|k| [100.0 + (k % 10) as f64 * 30.0, 100.0 + (k / 10) as f64 * 25.0 + ((k * 37) % 50) as f64, 1.0]).collect();
+        assert!(fit_shape(&pts).is_none());
     }
 }
