@@ -382,7 +382,8 @@ pub(super) fn tool_rail(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom }))
         .show(ui, |ui| {
             egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let ctx = ui.ctx().clone();
                 for g in GROUPS {
                     let current = st.variants.get(g.key).copied().unwrap_or(g.variants[0].0);
                     let selected = g.variants.iter().any(|(v, _)| rail_selected(app, st, *v));
@@ -409,9 +410,13 @@ pub(super) fn tool_rail(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui
                         }
                     }
                 }
-                ui.add_space(4.0);
+                if tbtn(ui, "image", false, "Imagen", false, t).clicked() {
+                    close_popovers(st);
+                    open_images(app, st, &ctx);
+                }
+                ui.add_space(8.0);
                 rail_color(app, st, ui, t);
-                ui.add_space(4.0);
+                ui.add_space(8.0);
                 properties_dock(app, st, ui, t);
             });
         });
@@ -445,10 +450,10 @@ fn properties_dock(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui,
         if !active {
             ui.disable();
         }
-        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.spacing_mut().item_spacing.y = 6.0;
         // Size: the number, tap for its slider.
         let size = app.session.tools.brush.size;
-        let (r, resp) = ui.allocate_exact_size(vec2(B, 32.0), Sense::click());
+        let (r, resp) = ui.allocate_exact_size(vec2(B, 34.0), Sense::click());
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 0.0)), CornerRadius::same(6), if st.size_open { t.accent } else { t.chrome });
         ui.painter().text(r.center(), Align2::CENTER_CENTER, fmt_size(size), egui::FontId::proportional(15.0), t.text);
         if resp.clicked() {
@@ -458,7 +463,7 @@ fn properties_dock(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui,
             st.dock_anchor = Some(pos2(r.right() + 16.0, r.top() - 40.0));
         }
         // The brush tip: the library.
-        let (r, resp) = ui.allocate_exact_size(vec2(B, 32.0), Sense::click());
+        let (r, resp) = ui.allocate_exact_size(vec2(B, 34.0), Sense::click());
         let sq = Rect::from_center_size(r.center(), Vec2::splat(22.0));
         ui.painter().rect_filled(sq, CornerRadius::same(5), t.text);
         ui.painter().rect_filled(sq.shrink(4.0), CornerRadius::same(3), if st.library_open { t.accent } else { t.chrome });
