@@ -1,17 +1,15 @@
 //! Touch interface for tablets (StylusArt on Android), in place of the desktop menu bar, options
-//! bar, toolbar and dock: large targets; a tool rail whose active tool opens its options (brush
-//! width/opacity/hardness with a stroke preview, type font/size/alignment, Patch, Crop and
-//! Artboard choices); an Apply/Cancel bar while a crop, transform or text edit is pending; a
-//! colour well; a Layers sheet with Remove Background, layer masks and clipping masks; image
-//! export (PNG with or without the background, JPG) and an image gallery to open photos; palm
-//! rejection. The canvas, dialogs and every action stay the same: each
+//! bar, toolbar and dock. The layout (top bar, tool rail with a properties strip, taskbar with
+//! layer thumbnails, popovers) is in `fresco`; this module holds the state, the tool options, the
+//! colour picker, export and the gallery, palm rejection, gestures, selection dragging and shape
+//! snapping. The canvas, dialogs and every action stay the same: each
 //! control here runs the engine command the desktop UI runs (`tools.setBrush`, `history.undo`,
 //! `layer.*`, `tools.setColors`).
 //!
 //! On when [`PhotocraftApp::touch`] is `Some`. StylusArt (the Android app) runs only this
 //! interface: there is no way to switch to the desktop one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -23,16 +21,14 @@ use serde_json::json;
 
 use crate::PhotocraftApp;
 use crate::icons;
+
+mod fresco;
+use fresco::{RAIL, TOP as BAR_TOP};
 use crate::state::Tool;
 use crate::theme::Tokens;
 
 const BAR_H: f32 = 60.0;
-const RAIL_W: f32 = 84.0;
-const BTN: f32 = 58.0;
-const ICON: f32 = 28.0;
 const BRUSH_POP_W: f32 = 400.0;
-const LAYERS_W: f32 = 340.0;
-const ROW_H: f32 = 60.0;
 /// Largest size the size slider reaches (the engine allows up to `MAX_BRUSH_SIZE`).
 const SLIDER_MAX_SIZE: f32 = 1000.0;
 
@@ -119,8 +115,30 @@ pub struct TouchUi {
     blend_open: bool,
     /// The Transform popover is open, and where (beside its rail button).
     pub transform_open: bool,
-    transform_anchor: Option<Pos2>,
     brush_query: String,
+    /// Top bar popovers: Inicio, Compartir, Ajustes, Ayuda; focus mode hides the side bars.
+    pub home_open: bool,
+    pub share_open: bool,
+    pub settings_open: bool,
+    pub help_open: bool,
+    focus: bool,
+    /// Properties strip popovers (size, smoothing) and where they open.
+    pub size_open: bool,
+    pub smooth_open: bool,
+    dock_anchor: Option<Pos2>,
+    /// Taskbar popovers.
+    pub layer_props_open: bool,
+    pub layer_more_open: bool,
+    pub precision_open: bool,
+    /// The variant each rail group shows (the one used last).
+    variants: HashMap<&'static str, Tool>,
+    /// The brush library's tab ("★" favourites, "" all, else a preset group) and favourites.
+    library_tab: String,
+    favorites: HashSet<String>,
+    /// Where the favourite brushes are saved (the app's data folder); `None`: not saved.
+    pub favorites_path: Option<PathBuf>,
+    /// The tool the touch shortcut replaced with the eraser while held.
+    shortcut_prev: Option<Tool>,
 }
 
 impl TouchUi {
@@ -165,34 +183,61 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if app.session.active().is_none() {
             new_canvas(app, ui.ctx());
         }
+        fresco::load_favorites(&mut st);
     }
     dismiss_on_outside_tap(&mut st, ui.ctx());
     run_gestures(app, ui.ctx());
     drag_selection(app, &mut st, ui.ctx());
     snap_shape(app, &mut st, ui.ctx());
-    top_bar(app, &mut st, ui, &t);
-    tool_rail(app, &mut st, ui, &t);
-    if st.layers_open {
-        layers_sheet(app, &mut st, ui, &t);
+    let ctx = ui.ctx().clone();
+    fresco::top_bar(app, &mut st, ui, &t);
+    if !st.focus {
+        fresco::tool_rail(app, &mut st, ui, &t);
+        fresco::task_bar(app, &mut st, ui, &t);
+        if st.layers_open {
+            fresco::layer_thumbs(app, ui, &t);
+        }
     }
-    if st.menu_open {
-        menu_popover(app, &mut st, ui.ctx(), &t);
+    fresco::touch_shortcut(app, &mut st, &ctx, &t);
+    if st.home_open {
+        fresco::home_menu(app, &mut st, &ctx, &t);
+    }
+    if st.share_open {
+        fresco::share_menu(app, &mut st, &ctx, &t);
+    }
+    if st.settings_open {
+        fresco::settings_panel(app, &mut st, &ctx, &t);
+    }
+    if st.help_open {
+        fresco::help_popover(&mut st, &ctx, &t);
     }
     if st.color_open {
-        color_popover(app, &mut st, ui.ctx(), &t);
+        color_popover(app, &mut st, &ctx, &t);
     }
     if st.brush_open {
-        tool_options(app, &mut st, ui.ctx(), &t);
+        tool_options(app, &mut st, &ctx, &t);
     }
-    action_bar(app, ui.ctx(), &t);
-    if st.transform_open {
-        transform_options(app, &mut st, ui.ctx(), &t);
+    if st.size_open {
+        fresco::size_popover(app, &mut st, &ctx, &t);
+    }
+    if st.smooth_open {
+        fresco::smooth_popover(app, &mut st, &ctx, &t);
     }
     if st.library_open {
-        brush_library(app, &mut st, ui.ctx(), &t);
+        fresco::brush_library(app, &mut st, &ctx, &t);
     }
+    if st.layer_props_open {
+        fresco::layer_props(app, &mut st, &ctx, &t);
+    }
+    if st.layer_more_open {
+        fresco::layer_more(app, &mut st, &ctx, &t);
+    }
+    if st.precision_open {
+        fresco::precision_popover(app, &mut st, &ctx, &t);
+    }
+    action_bar(app, &ctx, &t);
     if st.gallery.is_some() {
-        gallery_sheet(app, &mut st, ui.ctx(), &t);
+        gallery_sheet(app, &mut st, &ctx, &t);
     }
     show_notice(&mut st, ui.ctx(), &t);
     // One more frame after any input. A tap's effect (the selected layer, a colour, a tool) is
@@ -208,18 +253,16 @@ pub fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 /// A tap on the image outside the open popovers closes them (as on iPad and Android). The tap
 /// still does what it does there.
 fn dismiss_on_outside_tap(st: &mut TouchUi, ctx: &egui::Context) {
-    if !(st.menu_open || st.color_open || st.brush_open || st.transform_open) {
+    let any = st.home_open || st.share_open || st.settings_open || st.help_open || st.color_open || st.brush_open || st.size_open || st.smooth_open || st.library_open || st.layer_props_open || st.layer_more_open || st.precision_open;
+    if !any {
         return;
     }
     let Some(pos) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) else { return };
     // Only on the image: the bar and rail buttons toggle their own popovers.
     let on_canvas = CANVAS_RECT.lock().unwrap_or_else(PoisonError::into_inner).is_some_and(|r| r.contains(pos));
     if on_canvas && ctx.layer_id_at(pos).is_none_or(|l| l.order == egui::Order::Background) {
-        st.menu_open = false;
-        st.color_open = false;
-        st.brush_open = false;
-        st.transform_open = false;
-        st.picking = None;
+        st.opacity_drag = None;
+        fresco::close_popovers(st);
     }
 }
 
@@ -249,86 +292,6 @@ fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str) {
     }
 }
 
-fn icon_button(ui: &mut egui::Ui, name: &str, selected: bool, tip: &str) -> egui::Response {
-    icons::button_with_icon_size(ui, name, BTN, ICON, selected, tip)
-}
-
-fn top_bar(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
-    egui::Panel::top("touch-top")
-        .resizable(false)
-        .exact_size(BAR_H)
-        .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(12, 1)))
-        .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if icon_button(ui, "ellipsis", st.menu_open, "Menú").clicked() {
-                    st.menu_open = !st.menu_open;
-                    st.color_open = false;
-                }
-                let title = app.session.active().map(|d| d.doc.name.clone()).unwrap_or_else(|| "StylusArt".into());
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(title).size(20.0).color(t.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, "layers", st.layers_open, "Capas").clicked() {
-                        st.layers_open = !st.layers_open;
-                    }
-                    ui.add_space(6.0);
-                    color_well(app, st, ui, t);
-                    ui.add_space(12.0);
-                    let redo = icon_button(ui, "redo-2", false, "Rehacer");
-                    let undo = icon_button(ui, "undo-2", false, "Deshacer");
-                    if undo.clicked() {
-                        run(app, "history.undo", json!({}));
-                    }
-                    if redo.clicked() {
-                        run(app, "history.redo", json!({}));
-                    }
-                });
-            });
-        });
-}
-
-fn tool_rail(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
-    // Room under the last button for the system navigation bar.
-    let bottom = (10.0 + safe_bottom()).min(120.0) as i8;
-    egui::Panel::left("touch-tools")
-        .resizable(false)
-        .exact_size(RAIL_W)
-        .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin { left: 13, right: 13, top: 10, bottom }))
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                for &(tool, tip) in TOOLS {
-                    let selected = rail_selected(app, st, tool);
-                    let resp = icon_button(ui, icons::tool_icon(tool), selected, tip);
-                    if resp.clicked() {
-                        if selected {
-                            // A second tap on the active tool opens its settings (as in Samsung
-                            // Notes and Procreate).
-                            toggle_brush(st, resp.rect);
-                        } else {
-                            pick_rail_tool(app, st, tool);
-                            st.brush_open = false;
-                        }
-                    }
-                }
-                ui.add_space(10.0);
-                let resp = icon_button(ui, "scaling", st.transform_open, "Transformar");
-                if resp.clicked() {
-                    st.transform_open = !st.transform_open;
-                    st.transform_anchor = Some(pos2(resp.rect.right() + 22.0, resp.rect.top()));
-                    st.brush_open = false;
-                    st.color_open = false;
-                    st.menu_open = false;
-                }
-                let resp = icon_button(ui, "sliders-horizontal", st.brush_open, "Ajustes del pincel");
-                if resp.clicked() {
-                    toggle_brush(st, resp.rect);
-                }
-            });
-        });
-}
-
 /// The rail's Lápiz is the Brush tool with a graphite brush of its own (the Pencil tool paints
 /// aliased, hard pixels, which on a tablet look just like the Brush); Pincel is the Brush tool with
 /// its own brush.
@@ -342,7 +305,7 @@ fn rail_selected(app: &PhotocraftApp, st: &TouchUi, entry: Tool) -> bool {
 
 /// The name the active tool shows (Lápiz for the pencil mode of the Brush).
 fn active_tool_name(app: &PhotocraftApp, st: &TouchUi) -> &'static str {
-    if app.ui.tool == Tool::Brush && st.pencil_mode { "Lápiz" } else { tool_name(app.ui.tool) }
+    if app.ui.tool == Tool::Brush && st.pencil_mode { "Lápiz" } else { fresco::variant_name(app.ui.tool).unwrap_or_else(|| tool_name(app.ui.tool)) }
 }
 
 /// Put `b` in as the live brush, keeping the session's colours and erase flag.
@@ -395,12 +358,6 @@ fn pick_rail_tool(app: &mut PhotocraftApp, st: &mut TouchUi, entry: Tool) {
     }
 }
 
-fn toggle_brush(st: &mut TouchUi, button: Rect) {
-    st.brush_open = !st.brush_open;
-    st.brush_anchor = Some(pos2(button.right() + 22.0, button.top()));
-    st.color_open = false;
-    st.menu_open = false;
-}
 fn fmt_size(s: f32) -> String {
     if s < 10.0 { format!("{s:.1}") } else { format!("{}", s.round()) }
 }
@@ -420,13 +377,13 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
         Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => 720.0,
         _ => 380.0,
     };
-    let anchor = st.brush_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
-    let lo = screen.top() + BAR_H + 6.0;
+    let anchor = st.brush_anchor.unwrap_or(pos2(RAIL + 10.0, BAR_TOP + 10.0));
+    let lo = screen.top() + BAR_TOP + 6.0;
     let top = anchor.y.clamp(lo, (screen.bottom() - safe_bottom() - height - 8.0).max(lo));
     let mut close = false;
     egui::Area::new(egui::Id::new("touch-brush")).order(egui::Order::Foreground).fixed_pos(pos2(anchor.x, top)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(popover_room(ui)).min_scrolled_height(popover_room(ui)).show(ui, |ui| {
             let w = BRUSH_POP_W - 32.0;
             ui.set_width(w);
             ui.horizontal(|ui| {
@@ -438,8 +395,11 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
                 });
             });
             ui.add_space(6.0);
+            variant_chips(app, st, ui, t);
             match tool {
-                Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge => brush_options(app, st, ui, w, t),
+                Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Smudge | Tool::MixerBrush | Tool::Blur => brush_options(app, st, ui, w, t),
+                Tool::Move => move_options(app, st, ui, t),
+                Tool::Rectangle | Tool::EllipseShape | Tool::Line => hint(ui, "Arrastra sobre el lienzo para dibujar la forma con el color actual.", t),
                 Tool::Type => text_options(app, st, ui, t),
                 Tool::Patch => patch_options(app, ui, t),
                 Tool::Crop => crop_options(app, ui, t),
@@ -451,6 +411,58 @@ fn tool_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, 
     });
     if close {
         st.brush_open = false;
+    }
+}
+
+/// The tool's group variants as chips (Lazo · Rectangular · Varita…), when it has several.
+fn variant_chips(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
+    let Some(g) = fresco_group(app.ui.tool) else { return };
+    if g.1.len() < 2 {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        for &(tool, name) in g.1 {
+            if chip(ui, name, app.ui.tool == tool, t).clicked() && app.ui.tool != tool {
+                pick_rail_tool(app, st, tool);
+                st.variants.insert(g.0, tool);
+            }
+        }
+    });
+    ui.add_space(8.0);
+}
+
+fn fresco_group(tool: Tool) -> Option<(&'static str, &'static [(Tool, &'static str)])> {
+    const G: &[(&str, &[(Tool, &str)])] = &[
+        ("move", &[(Tool::Move, "Mover y transformar"), (Tool::Crop, "Recortar")]),
+        ("select", &[(Tool::Lasso, "Lazo"), (Tool::RectMarquee, "Rectangular"), (Tool::MagicWand, "Varita mágica"), (Tool::QuickSelection, "Selección rápida")]),
+        ("fill", &[(Tool::PaintBucket, "Relleno"), (Tool::Gradient, "Degradado")]),
+        ("smudge", &[(Tool::Smudge, "Difuminar"), (Tool::Blur, "Desenfocar"), (Tool::Patch, "Parche")]),
+        ("shapes", &[(Tool::Rectangle, "Rectángulo"), (Tool::EllipseShape, "Elipse"), (Tool::Line, "Línea"), (Tool::Artboard, "Mesa de trabajo")]),
+    ];
+    G.iter().find(|(_, v)| v.iter().any(|(t, _)| *t == tool)).copied()
+}
+
+/// Move: drag to move the layer (or selection); free transform, flips and quarter turns.
+fn move_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
+    hint(ui, "Arrastra para mover la capa activa (o la selección). Con Transformación libre, arrastra las esquinas para escalar y fuera de ellas para rotar; luego Aplicar.", t);
+    let ctx = ui.ctx().clone();
+    ui.spacing_mut().item_spacing.y = 8.0;
+    if big_button(ui, "Transformación libre", t).clicked() {
+        invoke(app, &ctx, "edit.freeTransform");
+        st.brush_open = false;
+    }
+    for (id, label) in [
+        ("edit.transform.flipHorizontal", "Voltear horizontal"),
+        ("edit.transform.flipVertical", "Voltear vertical"),
+        ("edit.transform.rotate90Cw", "Rotar 90° a la derecha"),
+        ("edit.transform.rotate90Ccw", "Rotar 90° a la izquierda"),
+    ] {
+        if big_button(ui, label, t).clicked()
+            && let Err(e) = app.run(id, json!({}))
+        {
+            notify(st, &ctx, &e);
+        }
     }
 }
 
@@ -784,85 +796,6 @@ fn symmetry_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui
     });
 }
 
-/// The brush presets (built-in and imported) with their real strokes; a tap picks one.
-fn brush_library(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
-    let screen = ctx.content_rect();
-    let width = 560.0_f32.min(screen.width() - RAIL_W - 40.0);
-    let rect = Rect::from_min_size(pos2(RAIL_W + 12.0, screen.top() + BAR_H + 10.0), vec2(width, screen.height() - BAR_H - 16.0 - safe_bottom()));
-    let mut close = false;
-    let mut pick: Option<String> = None;
-    let color = fg_color(app);
-    egui::Area::new(egui::Id::new("touch-brush-library")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
-        popover_frame(t).show(ui, |ui| {
-            ui.set_width(rect.width() - 32.0);
-            ui.set_height(rect.height() - 32.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Pinceles").size(22.0).strong().color(t.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::button_with_icon_size(ui, "x", 44.0, 22.0, false, "Cerrar").clicked() {
-                        close = true;
-                    }
-                });
-            });
-            ui.add(
-                egui::TextEdit::singleline(&mut st.brush_query)
-                    .hint_text("Buscar pincel…")
-                    .desired_width(f32::INFINITY)
-                    .font(egui::FontId::proportional(18.0))
-                    .margin(egui::Margin::symmetric(10, 8)),
-            );
-            ui.add_space(8.0);
-            let query = st.brush_query.to_lowercase();
-            let presets: Vec<(usize, String, String)> = app
-                .session
-                .tools
-                .presets
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| query.is_empty() || p.name.to_lowercase().contains(&query) || p.group.to_lowercase().contains(&query))
-                .map(|(i, p)| (i, p.name.clone(), p.group.clone()))
-                .collect();
-            if presets.is_empty() {
-                hint(ui, "No hay pinceles que coincidan.", t);
-                return;
-            }
-            let row_h = 92.0;
-            let ppp = ui.ctx().pixels_per_point();
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, presets.len(), |ui, range| {
-                for (i, name, group) in presets.get(range).unwrap_or_default() {
-                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h - 6.0), Sense::click());
-                    ui.painter().rect_filled(r, CornerRadius::same(12), if resp.is_pointer_button_down_on() { t.pressed } else { t.field });
-                    let stroke_r = Rect::from_min_max(pos2(r.left() + 10.0, r.top() + 6.0), pos2(r.right() - 10.0, r.bottom() - 26.0));
-                    if let Some(p) = app.session.tools.presets.get(*i) {
-                        let tex = crate::brush_preview::stroke_texture(ui.ctx(), &format!("touch-lib-{i}"), &p.brush, (stroke_r.width() * ppp) as u32, (stroke_r.height() * ppp) as u32, color);
-                        ui.painter().image(tex.id(), stroke_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                    }
-                    ui.painter().text(pos2(r.left() + 14.0, r.bottom() - 13.0), Align2::LEFT_CENTER, name, egui::FontId::proportional(16.0), t.text);
-                    if !group.is_empty() {
-                        ui.painter().text(pos2(r.right() - 14.0, r.bottom() - 13.0), Align2::RIGHT_CENTER, group, egui::FontId::proportional(13.0), t.text_dim);
-                    }
-                    if resp.clicked() {
-                        pick = Some(name.clone());
-                    }
-                    ui.add_space(6.0);
-                }
-            });
-        });
-    });
-    if let Some(name) = pick {
-        match app.run("tools.setBrush", json!({ "preset": name })) {
-            Ok(_) => {
-                notify(st, ctx, &format!("Pincel: {name}"));
-                close = true;
-            }
-            Err(e) => notify(st, ctx, &e),
-        }
-    }
-    if close {
-        st.library_open = false;
-    }
-}
-
 fn caption(ui: &mut egui::Ui, label: &str, value: &str, t: &Tokens) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).size(17.0).color(t.text));
@@ -971,6 +904,11 @@ pub(crate) fn note_canvas(rect: Rect) {
 /// Whether a finger going down at `pos` (points) reaches the app: not on the image (unless
 /// finger painting is on), unless a window, popover or dialog covers that spot.
 pub fn finger_allowed(ctx: &egui::Context, pos: Pos2) -> bool {
+    // The touch shortcut is read from the raw touches (see the gestures), not as a tap, so the
+    // pen can keep drawing while a finger holds it.
+    if fresco::SHORTCUT_RECT.lock().unwrap_or_else(PoisonError::into_inner).is_some_and(|r| r.contains(pos)) {
+        return false;
+    }
     if FINGER_PAINT.load(Ordering::Relaxed) {
         return true;
     }
@@ -1006,21 +944,6 @@ fn set_fg(app: &mut PhotocraftApp, st: &mut TouchUi, c: Color32) {
 }
 
 const RECENT_MAX: usize = 10;
-
-fn color_well(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
-    let (outer, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
-    let c = outer.center();
-    let p = ui.painter();
-    p.circle_filled(c, BTN / 2.0 - 2.0, shown_fg(app, st));
-    p.circle_stroke(c, BTN / 2.0 - 2.0, Stroke::new(3.0, if st.color_open { t.accent } else { t.text }));
-    if resp.clicked() {
-        st.color_open = !st.color_open;
-        st.menu_open = false;
-        st.brush_open = false;
-        st.color_anchor = Some(pos2(outer.right(), outer.bottom() + 6.0));
-        st.hsv = color_to_hsv(fg_color(app), st.hsv);
-    }
-}
 
 /// HSV in 0..1, kept by the picker so the hue survives greys and black (an RGB round trip would
 /// lose it and make the picker jump).
@@ -1071,11 +994,12 @@ fn color_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context,
     let size = vec2(300.0, 400.0);
     // Below the colour well, right-aligned with it.
     let anchor = st.color_anchor.unwrap_or(pos2(screen.right() - 80.0, BAR_H + 6.0));
-    let left = (anchor.x - size.x).max(screen.left() + 8.0);
+    let left = if anchor.x < screen.center().x { anchor.x } else { (anchor.x - size.x).max(screen.left() + 8.0) };
+    let anchor = pos2(anchor.x, anchor.y.clamp(screen.top() + BAR_TOP + 6.0, (screen.bottom() - safe_bottom() - size.y - 8.0).max(screen.top() + BAR_TOP + 6.0)));
     let mut commit: Option<Color32> = None;
     egui::Area::new(egui::Id::new("touch-color")).order(egui::Order::Foreground).fixed_pos(pos2(left, anchor.y)).show(ctx, |ui| {
         popover_frame(t).show(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(popover_room(ui)).min_scrolled_height(popover_room(ui)).show(ui, |ui| {
             let w = size.x - 32.0;
             ui.set_width(w);
             let mut hsv = st.picking.unwrap_or(st.hsv);
@@ -1214,51 +1138,6 @@ fn big_button(ui: &mut egui::Ui, text: &str, t: &Tokens) -> egui::Response {
     ui.painter().rect_filled(r, CornerRadius::same(12), fill);
     ui.painter().text(r.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(19.0), t.text);
     resp
-}
-
-fn menu_popover(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
-    let mut close = false;
-    egui::Area::new(egui::Id::new("touch-menu")).order(egui::Order::Foreground).fixed_pos(pos2(12.0, BAR_H + 6.0)).show(ctx, |ui| {
-        popover_frame(t).show(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
-            ui.set_width(320.0);
-            ui.spacing_mut().item_spacing.y = 8.0;
-            if big_button(ui, "Nuevo lienzo", t).clicked() {
-                new_canvas(app, ctx);
-                close = true;
-            }
-            if big_button(ui, "Abrir imagen…", t).clicked() {
-                open_images(app, st, ctx);
-                close = true;
-            }
-            ui.add_space(4.0);
-            if big_button(ui, "Exportar PNG", t).clicked() {
-                export_image(app, st, ctx, "png", false);
-                close = true;
-            }
-            if big_button(ui, "Exportar PNG sin fondo", t).clicked() {
-                export_image(app, st, ctx, "png", true);
-                close = true;
-            }
-            if big_button(ui, "Exportar JPG", t).clicked() {
-                export_image(app, st, ctx, "jpg", false);
-                close = true;
-            }
-            ui.add_space(4.0);
-            if big_button(ui, "Ajustar a la pantalla", t).clicked() {
-                invoke(app, ctx, "view.fitOnScreen");
-                close = true;
-            }
-            let finger = FINGER_PAINT.load(Ordering::Relaxed);
-            if big_button(ui, if finger { "Dibujar con el dedo: Sí" } else { "Dibujar con el dedo: No" }, t).clicked() {
-                FINGER_PAINT.store(!finger, Ordering::Relaxed);
-            }
-        });
-        });
-    });
-    if close {
-        st.menu_open = false;
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1477,10 +1356,6 @@ struct Row {
     id: u64,
     name: String,
     visible: bool,
-    opacity: f32,
-    depth: usize,
-    mask: bool,
-    clipped: bool,
     group: bool,
     artboard: bool,
 }
@@ -1492,105 +1367,11 @@ fn rows(layers: &[Layer], depth: usize, out: &mut Vec<Row>) {
             LayerContent::Group(g) => (true, g.artboard.is_some()),
             _ => (false, false),
         };
-        out.push(Row {
-            id: l.id.0,
-            name: l.name.clone(),
-            visible: l.visible,
-            opacity: l.opacity,
-            depth,
-            mask: l.mask.is_some(),
-            clipped: l.clipped,
-            group,
-            artboard,
-        });
+        out.push(Row { id: l.id.0, name: l.name.clone(), visible: l.visible, group, artboard });
         if let Some(children) = l.children() {
             rows(children, depth + 1, out);
         }
     }
-}
-
-fn layers_sheet(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, t: &Tokens) {
-    egui::Panel::right("touch-layers")
-        .resizable(false)
-        .exact_size(LAYERS_W)
-        .frame(egui::Frame::NONE.fill(t.dock).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: (12.0 + safe_bottom()).min(120.0) as i8 }))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Capas").size(22.0).strong().color(t.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, "trash", false, "Eliminar capa").clicked() {
-                        run(app, "layer.delete", json!({}));
-                    }
-                    if icon_button(ui, "copy", false, "Duplicar capa").clicked() {
-                        run(app, "layer.duplicate", json!({}));
-                    }
-                    if icon_button(ui, "plus", false, "Nueva capa").clicked() {
-                        run(app, "layer.new.layer", json!({}));
-                    }
-                });
-            });
-            ui.add_space(8.0);
-            let Some(d) = app.session.active() else {
-                ui.label("Sin documento");
-                return;
-            };
-            let active = d.active_layer.map(|l| l.0);
-            let mut list = Vec::new();
-            rows(&d.doc.layers, 0, &mut list);
-            let current = list.iter().find(|r| Some(r.id) == active).map(|r| (r.id, r.opacity, r.mask, r.clipped));
-            let blend = active.and_then(|id| d.doc.layer(photocraft_doc::LayerId(id))).map(|l| l.blend);
-            let is_background = active.is_some_and(|id| d.doc.is_background(photocraft_doc::LayerId(id)));
-            let ctx = ui.ctx().clone();
-            // Actions on the active layer.
-            if let Some((id, _, mask, clipped)) = current {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    if chip(ui, "Quitar fondo", false, t).clicked() {
-                        remove_background(app, st, &ctx);
-                    }
-                    if chip(ui, if mask { "Quitar máscara" } else { "Añadir máscara" }, mask, t).clicked() {
-                        let r = app.run(if mask { "layer.layerMask.delete" } else { "layer.layerMask.revealAll" }, json!({}));
-                        if let Err(e) = r {
-                            notify(st, &ctx, &e);
-                        }
-                    }
-                    if chip(ui, "Máscara de recorte", clipped, t).clicked()
-                        && let Err(e) = app.run("layer.setProps", json!({ "layer": id, "clipped": !clipped }))
-                    {
-                        notify(st, &ctx, &e);
-                    }
-                });
-                ui.add_space(8.0);
-                if is_background {
-                    hint(ui, "El Fondo no tiene opacidad ni modo de fusión. Para dibujar y borrar sin tocarlo, añade una capa con +.", t);
-                } else if let Some(mode) = blend {
-                    blend_picker(app, st, ui, id, mode, t);
-                    ui.add_space(8.0);
-                }
-            }
-            egui::ScrollArea::vertical().max_height((ui.available_height() - 90.0).max(120.0)).show(ui, |ui| {
-                for r in &list {
-                    layer_row(app, ui, r, Some(r.id) == active, t);
-                }
-            });
-            if let Some((id, op, _, _)) = current.filter(|_| !is_background) {
-                ui.add_space(10.0);
-                // The touch slider (no number field, so no keyboard pops up and resizes the
-                // screen). Dragging shows the value; the opacity is set once, on release.
-                let shown = st.opacity_drag.filter(|(l, _)| *l == id).map_or(op, |(_, v)| v);
-                caption(ui, "Opacidad de la capa", &format!("{} %", (shown * 100.0).round()), t);
-                match h_slider(ui, shown, SliderFill::Accent, t) {
-                    Some(u) => st.opacity_drag = Some((id, (u * 100.0).round() / 100.0)),
-                    None => {
-                        if let Some((l, val)) = st.opacity_drag.take()
-                            && (val - op).abs() > f32::EPSILON
-                        {
-                            run(app, "layer.setProps", json!({ "layer": l, "opacity": val }));
-                        }
-                    }
-                }
-            }
-        });
 }
 
 /// Quitar fondo: Select Subject on the active layer, then a layer mask from that selection (the
@@ -1622,45 +1403,6 @@ fn remove_background(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Cont
         }
         Err(e) => notify(st, ctx, &format!("No se pudo crear la máscara: {e}")),
     }
-}
-
-fn layer_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, row: &Row, selected: bool, t: &Tokens) {
-    let w = ui.available_width();
-    let (r, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
-    let p = ui.painter();
-    let indent = row.depth as f32 * 18.0;
-    let body = r.with_min_x(r.left() + indent);
-    p.rect_filled(body, CornerRadius::same(12), if selected { t.row_selected } else { t.card });
-    let eye = Rect::from_min_size(body.min, vec2(ROW_H, ROW_H));
-    icons::paint(ui, eye, if row.visible { "eye" } else { "eye-off" }, 26.0, if row.visible { t.text } else { t.text_faint });
-    let mut x = eye.right() + 2.0;
-    let badge = |name: &str, x: f32| icons::paint(ui, Rect::from_center_size(pos2(x + 11.0, r.center().y), Vec2::splat(22.0)), name, 18.0, t.text_dim);
-    if row.clipped {
-        badge("clip-below", x);
-        x += 24.0;
-    }
-    if row.artboard {
-        badge("artboard", x);
-        x += 24.0;
-    } else if row.group {
-        badge("folder", x);
-        x += 24.0;
-    }
-    let name_w = (body.right() - x - (if row.mask { 34.0 } else { 8.0 })).max(20.0);
-    let galley = ui.painter().layout(row.name.clone(), egui::FontId::proportional(17.0), t.text, name_w);
-    ui.painter().galley(pos2(x + 2.0, r.center().y - galley.size().y / 2.0), galley, t.text);
-    if row.mask {
-        icons::paint(ui, Rect::from_center_size(pos2(body.right() - 20.0, r.center().y), Vec2::splat(24.0)), "layer-mask", 20.0, t.text_dim);
-    }
-    if resp.clicked() {
-        let tap = resp.interact_pointer_pos().unwrap_or(Pos2::ZERO);
-        if eye.contains(tap) {
-            run(app, "layer.setProps", json!({ "layer": row.id, "visible": !row.visible }));
-        } else if !selected {
-            run(app, "layer.select", json!({ "layer": row.id }));
-        }
-    }
-    ui.add_space(6.0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1723,6 +1465,8 @@ struct Gestures {
     /// Pens touching or hovering.
     pens: Vec<u64>,
     last_pen: Option<std::time::Instant>,
+    /// The finger holding the touch shortcut.
+    shortcut_finger: Option<u64>,
     /// The pen's last resting point, since when it has rested there, and when the stroke began.
     pen_rest: Option<(Pos2, std::time::Instant, std::time::Instant)>,
     /// The current multi-finger gesture: when it started, most fingers seen, whether it moved.
@@ -1785,6 +1529,15 @@ fn run_gestures(app: &mut PhotocraftApp, ctx: &egui::Context) {
             continue;
         }
         match e.phase {
+            TouchPhase::Start if fresco::SHORTCUT_RECT.lock().unwrap_or_else(PoisonError::into_inner).is_some_and(|r| r.contains(e.pos)) => {
+                g.shortcut_finger = Some(e.id);
+                fresco::SHORTCUT_HELD.store(true, Ordering::Relaxed);
+            }
+            TouchPhase::End | TouchPhase::Cancel if g.shortcut_finger == Some(e.id) => {
+                g.shortcut_finger = None;
+                fresco::SHORTCUT_HELD.store(false, Ordering::Relaxed);
+            }
+            _ if g.shortcut_finger == Some(e.id) => {}
             TouchPhase::Start => {
                 let pen_busy = !g.pens.is_empty() || g.last_pen.is_some_and(|t| at.duration_since(t).as_secs_f32() < PEN_GRACE);
                 if e.size >= PALM_SIZE || pen_busy || g.ignored.contains(&e.id) {
@@ -1877,7 +1630,15 @@ fn move_view(app: &mut PhotocraftApp, ctx: &egui::Context, prev: (Pos2, f32, f32
     } else if turn < -180.0 {
         turn += 360.0;
     }
-    let rotation = crate::rotate_view::wrap_deg(view.rotation + if flip { -turn } else { turn });
+    let mut rotation = crate::rotate_view::wrap_deg(view.rotation + if flip { -turn } else { turn });
+    // Settings › Imán de rotación: within 4° of a multiple of the step, snap to it.
+    let step = f32::from_bits(fresco::ROT_SNAP.load(Ordering::Relaxed));
+    if step > 0.0 {
+        let near = (rotation / step).round() * step;
+        if (rotation - near).abs() < 4.0 {
+            rotation = crate::rotate_view::wrap_deg(near);
+        }
+    }
     let under = xf(zoom, view.center, rotation).to_doc(now.0);
     view.center = [view.center[0] + (anchor[0] - under[0]) as f32, view.center[1] + (anchor[1] - under[1]) as f32];
     view.zoom = zoom;
@@ -1940,54 +1701,6 @@ fn blend_picker(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, la
     });
 }
 
-/// Transform the active layer (or the selection): free transform with handles, or one-tap flips
-/// and quarter turns.
-fn transform_options(app: &mut PhotocraftApp, st: &mut TouchUi, ctx: &egui::Context, t: &Tokens) {
-    let screen = ctx.content_rect();
-    let anchor = st.transform_anchor.unwrap_or(pos2(RAIL_W + 10.0, BAR_H + 10.0));
-    let height = 420.0;
-    let lo = screen.top() + BAR_H + 6.0;
-    let top = anchor.y.clamp(lo, (screen.bottom() - safe_bottom() - height - 8.0).max(lo));
-    let mut close = false;
-    egui::Area::new(egui::Id::new("touch-transform")).order(egui::Order::Foreground).fixed_pos(pos2(anchor.x, top)).show(ctx, |ui| {
-        popover_frame(t).show(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(popover_room(ui)).show(ui, |ui| {
-            ui.set_width(BRUSH_POP_W - 32.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Transformar").size(20.0).strong().color(t.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::button_with_icon_size(ui, "x", 40.0, 20.0, false, "Cerrar").clicked() {
-                        close = true;
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            hint(ui, "Transforma la capa activa (o la selección). Con Transformación libre, arrastra las esquinas con el lápiz para escalar, fuera de ellas para rotar, y toca Aplicar.", t);
-            ui.spacing_mut().item_spacing.y = 8.0;
-            if big_button(ui, "Transformación libre", t).clicked() {
-                invoke(app, ctx, "edit.freeTransform");
-                close = true;
-            }
-            for (id, label) in [
-                ("edit.transform.flipHorizontal", "Voltear horizontal"),
-                ("edit.transform.flipVertical", "Voltear vertical"),
-                ("edit.transform.rotate90Cw", "Rotar 90° a la derecha"),
-                ("edit.transform.rotate90Ccw", "Rotar 90° a la izquierda"),
-            ] {
-                if big_button(ui, label, t).clicked()
-                    && let Err(e) = app.run(id, json!({}))
-                {
-                    notify(st, ctx, &e);
-                }
-            }
-        });
-        });
-    });
-    if close {
-        st.transform_open = false;
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Drag a selection: with a selection tool, a press inside the selection moves what is selected
 // (the Move tool, just for that drag), as on iPad apps; a press outside starts a new selection.
@@ -2046,7 +1759,7 @@ static SHAPE_REQUEST: Mutex<Option<(usize, std::time::Instant)>> = Mutex::new(No
 
 /// Called by the gestures when a pen lifts after resting `held` seconds at the end of a stroke.
 fn request_shape(app: &PhotocraftApp, held: f32) {
-    if held >= HOLD_SECS {
+    if held >= HOLD_SECS && fresco::SHAPE_SNAP.load(Ordering::Relaxed) {
         *SHAPE_REQUEST.lock().unwrap_or_else(PoisonError::into_inner) = Some((app.session.journal.len(), std::time::Instant::now()));
     }
 }
@@ -2452,5 +2165,101 @@ mod shape_tests {
     fn a_scribble_is_left_alone() {
         let pts: Vec<[f64; 3]> = (0..=80).map(|k| [100.0 + (k % 10) as f64 * 30.0, 100.0 + (k / 10) as f64 * 25.0 + ((k * 37) % 50) as f64, 1.0]).collect();
         assert!(fit_shape(&pts).is_none());
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+    use crate::{PhotocraftApp, Services};
+    use photocraft_engine::Session;
+
+    fn app() -> (PhotocraftApp, TouchUi, egui::Context) {
+        let ctx = egui::Context::default();
+        let mut app = PhotocraftApp::new(Session::new(), Services::default());
+        new_canvas(&mut app, &ctx);
+        (app, TouchUi::new(), ctx)
+    }
+
+    fn pixel(app: &mut PhotocraftApp, x: u32, y: u32) -> Vec<f32> {
+        serde_json::from_value(app.run("document.pixel", json!({ "x": x, "y": y })).expect("pixel")).expect("rgba")
+    }
+
+    #[test]
+    fn a_new_canvas_draws_on_a_layer_above_a_white_background() {
+        let (app, _, _) = app();
+        let d = app.session.active().expect("doc");
+        assert_eq!(d.doc.layers.len(), 2, "Background + Capa 1");
+        let active = d.active_layer.expect("active");
+        assert!(!d.doc.is_background(active), "drawing starts on Capa 1, not the Background");
+        assert_eq!(d.doc.layer(active).map(|l| l.name.as_str()), Some("Capa 1"));
+    }
+
+    #[test]
+    fn the_eraser_starts_as_a_real_eraser() {
+        let (mut app, mut st, _) = app();
+        run(&mut app, "tools.setBrush", json!({ "preset": "Soft Round Pressure Opacity" }));
+        pick_rail_tool(&mut app, &mut st, Tool::Eraser);
+        let b = &app.session.tools.brush;
+        assert_eq!(app.ui.tool, Tool::Eraser);
+        assert_eq!((b.opacity, b.flow, b.hardness), (1.0, 1.0, 1.0));
+        assert!(!b.pressure_opacity, "light pressure must not only fade strokes");
+        assert_eq!(b.smoothing.amount, 0.0);
+    }
+
+    #[test]
+    fn erasing_on_the_drawing_layer_shows_the_white_background() {
+        let (mut app, _, _) = app();
+        run(&mut app, "tools.setColors", json!({ "foreground": "#000000" }));
+        run(&mut app, "paint.stroke", json!({ "points": [[100, 100], [300, 100]], "size": 40 }));
+        assert!(pixel(&mut app, 200, 100)[0] < 0.1, "the stroke is black");
+        run(&mut app, "paint.stroke", json!({ "points": [[100, 100], [300, 100]], "size": 80, "erase": true }));
+        let px = pixel(&mut app, 200, 100);
+        assert!(px.iter().take(3).all(|v| *v > 0.99), "erased to the white Background: {px:?}");
+        assert!(px.get(3).is_none_or(|a| *a > 0.99), "no transparent hole: {px:?}");
+    }
+
+    #[test]
+    fn pencil_and_brush_keep_their_own_settings() {
+        let (mut app, mut st, _) = app();
+        pick_rail_tool(&mut app, &mut st, Tool::Pencil);
+        assert!(st.pencil_mode && app.ui.tool == Tool::Brush);
+        run(&mut app, "tools.setBrush", json!({ "brush": { "size": 7.0 } }));
+        pick_rail_tool(&mut app, &mut st, Tool::Brush);
+        assert!(!st.pencil_mode);
+        run(&mut app, "tools.setBrush", json!({ "brush": { "size": 55.0 } }));
+        pick_rail_tool(&mut app, &mut st, Tool::Pencil);
+        assert_eq!(app.session.tools.brush.size, 7.0, "the pencil's size came back");
+        pick_rail_tool(&mut app, &mut st, Tool::Eraser);
+        pick_rail_tool(&mut app, &mut st, Tool::Brush);
+        assert_eq!(app.session.tools.brush.size, 55.0, "the brush's size survived a trip through the eraser");
+    }
+
+    #[test]
+    fn favourite_brushes_are_saved_and_loaded() {
+        let dir = std::env::temp_dir().join(format!("stylusart-fav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("favoritos.txt");
+        let mut st = TouchUi::new();
+        st.favorites_path = Some(path.clone());
+        st.favorites.insert("Soft Pencil".into());
+        st.favorites.insert("Hard Round".into());
+        fresco::save_favorites_for_test(&mut st);
+        let mut again = TouchUi::new();
+        again.favorites_path = Some(path);
+        fresco::load_favorites(&mut again);
+        assert_eq!(again.favorites, st.favorites);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn popovers_stay_above_the_navigation_bar() {
+        set_safe_bottom(48.0);
+        assert_eq!(safe_bottom(), 48.0);
+        set_safe_bottom(0.0);
+        assert_eq!(safe_bottom(), 28.0, "a margin above the gesture area even without a bar");
+        set_safe_bottom(500.0);
+        assert_eq!(safe_bottom(), 160.0, "a bogus inset can't eat the screen");
+        set_safe_bottom(0.0);
     }
 }

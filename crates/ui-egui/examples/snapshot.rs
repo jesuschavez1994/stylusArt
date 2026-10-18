@@ -91,7 +91,22 @@ fn main() {
                 touch_ui.brush_open = touch_brush;
                 touch_ui.color_open = touch_color;
                 touch_ui.library_open = args_has("--touch-library");
-                touch_ui.transform_open = args_has("--touch-transform");
+                // `--touch-open settings,size,props,precision,…`: popovers to show.
+                let open = arg(&std::env::args().collect::<Vec<_>>(), "--touch-open").unwrap_or_default();
+                let has = |k: &str| open.split(',').any(|o| o == k);
+                touch_ui.settings_open = has("settings");
+                touch_ui.size_open = has("size");
+                touch_ui.layer_props_open = has("props");
+                touch_ui.precision_open = has("precision");
+                touch_ui.help_open = has("help");
+                touch_ui.share_open = has("share");
+                touch_ui.home_open = has("home");
+                touch_ui.brush_open |= has("brush");
+                touch_ui.library_open |= has("library");
+                // `--safe-bottom N`: a system navigation bar N points tall (as on the tablet).
+                if let Some(n) = arg(&std::env::args().collect::<Vec<_>>(), "--safe-bottom").and_then(|v| v.parse::<f32>().ok()) {
+                    photocraft_ui_egui::touch_ui::set_safe_bottom(n);
+                }
                 app.touch = Some(touch_ui);
             }
             app.background_jobs = background_jobs;

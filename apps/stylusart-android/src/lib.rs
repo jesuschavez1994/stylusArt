@@ -51,6 +51,8 @@ fn android_main(android: AndroidApp) {
             // place of the desktop menus and panels. The app has no desktop mode.
             let mut touch = TouchUi::new();
             touch.export_dir = Some(PathBuf::from(STORAGE).join("Pictures/StylusArt"));
+            // Favourite brushes, kept in the app's private data folder.
+            touch.favorites_path = android.internal_data_path().map(|d| d.join("pinceles-favoritos.txt"));
             touch.gallery_dirs = ["Pictures/StylusArt", "Pictures", "DCIM/Camera", "Pictures/Screenshots", "DCIM/Screenshots", "Download"]
                 .iter()
                 .map(|d| PathBuf::from(STORAGE).join(d))

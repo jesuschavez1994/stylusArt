@@ -71,6 +71,19 @@ fn main() {
     stats("tools.setColors (command)", &cmd);
     stats("frame after tools.setColors", &frame);
 
+    // Eraser strokes across the canvas (a 2400 px stroke, 120 points), by size and dab spacing.
+    let pts: Vec<[f64; 3]> = (0..120).map(|k| [300.0 + k as f64 * 20.0, 800.0 + (k as f64 * 0.2).sin() * 300.0, 1.0]).collect();
+    for (size, spacing) in [(40.0, 0.1), (400.0, 0.1), (400.0, 0.2)] {
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            harness.state_mut().run("paint.stroke", json!({"points": pts, "size": size, "spacing": spacing, "hardness": 1.0, "erase": true})).expect("erase");
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+            harness.state_mut().run("history.undo", json!({})).expect("undo");
+        }
+        stats(&format!("eraser {size} px, spacing {}%", spacing * 100.0), &times);
+    }
+
     let mut idle = Vec::new();
     for _ in 0..30 {
         let t = Instant::now();
