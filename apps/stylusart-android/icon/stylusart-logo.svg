@@ -1,61 +1,72 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- StylusArt: an ink pen tilted from the top left, a drop falling from its nib into rippling
+       ink (after the owner's sketch). -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#3A1C8C"/>
       <stop offset="1" stop-color="#14123A"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.3" cy="0.22" r="0.75">
+    <radialGradient id="glow" cx="0.28" cy="0.2" r="0.8">
       <stop offset="0" stop-color="#8B5CF6" stop-opacity="0.55"/>
       <stop offset="1" stop-color="#8B5CF6" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#2EC4B6"/>
-      <stop offset="0.5" stop-color="#FF4D8D"/>
-      <stop offset="1" stop-color="#FFB703"/>
-    </linearGradient>
     <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7F5FF"/>
+      <stop offset="0.55" stop-color="#DCD6F5"/>
+      <stop offset="1" stop-color="#ACA3D6"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4FD1C5"/>
+      <stop offset="0.55" stop-color="#2E8BF0"/>
+      <stop offset="1" stop-color="#FF4D8D"/>
+    </linearGradient>
+    <linearGradient id="nib" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#FFE08A"/>
-      <stop offset="0.34" stop-color="#FFE08A"/>
-      <stop offset="0.34" stop-color="#FFC93C"/>
-      <stop offset="0.66" stop-color="#FFC93C"/>
-      <stop offset="0.66" stop-color="#F4A300"/>
-      <stop offset="1" stop-color="#F4A300"/>
+      <stop offset="0.5" stop-color="#FFC93C"/>
+      <stop offset="1" stop-color="#E39B00"/>
     </linearGradient>
-    <linearGradient id="ferrule" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#F1F3F6"/>
-      <stop offset="0.5" stop-color="#C3C9D3"/>
-      <stop offset="1" stop-color="#8E96A3"/>
-    </linearGradient>
-    <linearGradient id="eraser" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFA3B8"/>
-      <stop offset="1" stop-color="#F0567A"/>
-    </linearGradient>
+    <radialGradient id="pool" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4FD1C5" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#4FD1C5" stop-opacity="0"/>
+    </radialGradient>
     <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
       <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000000" flood-opacity="0.35"/>
     </filter>
   </defs>
 
-  <!-- Background -->
   <rect width="512" height="512" rx="112" fill="url(#bg)"/>
   <rect width="512" height="512" rx="112" fill="url(#glow)"/>
 
-  <!-- The colourful stroke the pencil leaves -->
-  <path d="M 157 345 C 192 430, 300 440, 404 372" fill="none" stroke="url(#stroke)" stroke-width="30" stroke-linecap="round"/>
+  <!-- Ripples where the drop lands -->
+  <ellipse cx="300" cy="418" rx="150" ry="40" fill="url(#pool)"/>
+  <ellipse cx="300" cy="418" rx="136" ry="34" fill="none" stroke="#C9C2F0" stroke-width="5" opacity="0.45"/>
+  <ellipse cx="300" cy="418" rx="88" ry="22" fill="none" stroke="#E4DFFF" stroke-width="6" opacity="0.8"/>
+  <ellipse cx="300" cy="418" rx="42" ry="10" fill="none" stroke="#FFFFFF" stroke-width="6"/>
+  <!-- A few strokes of moving water -->
+  <g fill="none" stroke="#C9C2F0" stroke-width="6" stroke-linecap="round" opacity="0.7">
+    <path d="M 78 386 C 100 374, 122 398, 146 386"/>
+    <path d="M 90 452 C 116 440, 140 464, 166 452"/>
+    <path d="M 440 380 C 418 368, 398 392, 374 380"/>
+    <path d="M 432 452 C 410 440, 388 464, 362 452"/>
+  </g>
 
-  <!-- Pencil: drawn pointing left, turned so the tip lands at the start of the stroke -->
-  <g transform="translate(262 238) rotate(-45)" filter="url(#shadow)">
-    <!-- wood cone -->
-    <path d="M -150 0 L -96 -32 L -96 32 Z" fill="#F5C890"/>
-    <path d="M -150 0 L -96 0 L -96 32 Z" fill="#E3AE6E"/>
-    <!-- graphite tip -->
-    <path d="M -150 0 L -129 -12.5 L -129 12.5 Z" fill="#2B2B3A"/>
-    <!-- body -->
-    <rect x="-96" y="-32" width="170" height="64" fill="url(#body)"/>
-    <!-- ferrule -->
-    <rect x="74" y="-34" width="34" height="68" rx="4" fill="url(#ferrule)"/>
-    <rect x="84" y="-34" width="3" height="68" fill="#8E96A3" opacity="0.7"/>
-    <rect x="95" y="-34" width="3" height="68" fill="#8E96A3" opacity="0.7"/>
-    <!-- eraser -->
-    <path d="M 108 -32 L 132 -32 Q 156 -32 156 -8 L 156 8 Q 156 32 132 32 L 108 32 Z" fill="url(#eraser)"/>
+  <!-- The drop of ink -->
+  <path d="M 300 290 C 300 290, 264 338, 264 360 A 36 36 0 0 0 336 360 C 336 338, 300 290, 300 290 Z" fill="url(#ink)"/>
+  <path d="M 286 346 C 284 356, 286 366, 294 372" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" opacity="0.7"/>
+
+  <!-- The pen: body, threaded collar, fountain-pen nib; drawn pointing right, turned 40 degrees so
+       the nib's tip sits right above the drop -->
+  <g transform="translate(215 204) rotate(40) scale(0.8)" filter="url(#shadow)">
+    <path d="M -175 -46 L 26 -46 L 26 46 L -175 46 Q -205 46 -205 0 Q -205 -46 -175 -46 Z" fill="url(#body)"/>
+    <rect x="-140" y="-46" width="16" height="92" fill="#8B7FD0" opacity="0.6"/>
+    <rect x="26" y="-38" width="34" height="76" rx="6" fill="#6C5FC0"/>
+    <g stroke="#3A2E8C" stroke-width="4" opacity="0.8">
+      <line x1="34" y1="-38" x2="34" y2="38"/>
+      <line x1="43" y1="-38" x2="43" y2="38"/>
+      <line x1="52" y1="-38" x2="52" y2="38"/>
+    </g>
+    <path d="M 60 -30 L 112 -14 L 138 0 L 112 14 L 60 30 Z" fill="url(#nib)"/>
+    <line x1="92" y1="0" x2="136" y2="0" stroke="#7A4E00" stroke-width="3"/>
+    <circle cx="90" cy="0" r="6" fill="#7A4E00"/>
   </g>
 </svg>

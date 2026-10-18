@@ -488,7 +488,8 @@ fn tool_hint(tool: Tool) -> &'static str {
 fn brush_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, w: f32, t: &Tokens) {
     stroke_preview(app, ui, w, t);
     ui.add_space(8.0);
-    if big_button(ui, "Cambiar pincel…", t).clicked() {
+    let erasing = matches!(app.ui.tool, Tool::Eraser);
+    if big_button(ui, if erasing { "Cambiar punta…" } else { "Cambiar pincel…" }, t).clicked() {
         st.library_open = true;
         st.brush_open = false;
     }
@@ -509,7 +510,7 @@ fn brush_options(app: &mut PhotocraftApp, st: &mut TouchUi, ui: &mut egui::Ui, w
         }
     }
     ui.add_space(10.0);
-    caption(ui, "Opacidad", &format!("{} %", (b.opacity * 100.0).round()), t);
+    caption(ui, if erasing { "Intensidad del borrado" } else { "Opacidad" }, &format!("{} %", (b.opacity * 100.0).round()), t);
     if let Some(u) = h_slider(ui, b.opacity, SliderFill::Opacity(fg_color(app)), t) {
         let o = (u * 100.0).round().clamp(1.0, 100.0) / 100.0;
         if o != b.opacity {
